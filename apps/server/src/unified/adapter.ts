@@ -243,6 +243,7 @@ function createHandlerTable(
         ...(command.approvalPolicy
           ? { approvalPolicy: command.approvalPolicy }
           : {}),
+        serviceName: "farfield",
         ...(typeof command.ephemeral === "boolean"
           ? { ephemeral: command.ephemeral }
           : {}),

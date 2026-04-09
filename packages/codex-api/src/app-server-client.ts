@@ -9,6 +9,7 @@ import {
   AppServerGetAccountRateLimitsResponseSchema,
   type AppServerReadThreadResponse,
   AppServerReadThreadResponseSchema,
+  AppServerServerRequestSchema,
   type AppServerStartThreadResponse,
   AppServerStartThreadRequestSchema,
   AppServerStartThreadResponseSchema,
@@ -24,8 +25,11 @@ import { z } from "zod";
 import {
   AppServerTransport,
   ChildProcessAppServerTransport,
+  type AppServerServerRequestMessage,
   type ChildProcessAppServerTransportOptions
 } from "./app-server-transport.js";
+
+type AppServerServerRequest = z.infer<typeof AppServerServerRequestSchema>;
 
 function parseWithSchema<T>(
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
@@ -64,6 +68,7 @@ export interface StartThreadOptions {
   personality?: string;
   sandbox?: string;
   approvalPolicy?: string;
+  serviceName?: string;
   ephemeral?: boolean;
 }
 
@@ -106,14 +111,20 @@ type AppServerLoadedThreadListResponse = z.infer<typeof AppServerLoadedThreadLis
 
 export class AppServerClient {
   private readonly transport: AppServerTransport;
+  private readonly pendingServerRequestsByThreadId = new Map<
+    string,
+    Map<string, AppServerServerRequest>
+  >();
 
   public constructor(transportOrOptions: AppServerTransport | ChildProcessAppServerTransportOptions) {
     if ("request" in transportOrOptions && "close" in transportOrOptions) {
       this.transport = transportOrOptions;
-      return;
+    } else {
+      this.transport = new ChildProcessAppServerTransport(transportOrOptions);
     }
-
-    this.transport = new ChildProcessAppServerTransport(transportOrOptions);
+    this.transport.setServerRequestHandler?.((request) => {
+      this.handleServerRequest(request);
+    });
   }
 
   public async close(): Promise<void> {
@@ -195,7 +206,20 @@ export class AppServerClient {
       includeTurns
     });
 
-    return parseWithSchema(AppServerReadThreadResponseSchema, result, "AppServerReadThreadResponse");
+    const parsed = parseWithSchema(
+      AppServerReadThreadResponseSchema,
+      result,
+      "AppServerReadThreadResponse"
+    );
+    return {
+      thread: {
+        ...parsed.thread,
+        requests: this.mergePendingServerRequests(
+          parsed.thread.id,
+          parsed.thread.requests
+        )
+      }
+    };
   }
 
   public async listModels(limit = 100): Promise<AppServerListModelsResponse> {
@@ -269,6 +293,7 @@ export class AppServerClient {
     const parsedRequestId = UserInputRequestIdSchema.parse(requestId);
     const payload = parseUserInputResponsePayload(response);
     await this.transport.respond(parsedRequestId, payload);
+    this.removePendingServerRequest(parsedRequestId);
   }
 
   public async resumeThread(
@@ -280,6 +305,89 @@ export class AppServerClient {
       persistExtendedHistory: options?.persistExtendedHistory ?? true
     });
     const result = await this.transport.request("thread/resume", request);
-    return parseWithSchema(AppServerReadThreadResponseSchema, result, "AppServerResumeThreadResponse");
+    const parsed = parseWithSchema(
+      AppServerReadThreadResponseSchema,
+      result,
+      "AppServerResumeThreadResponse"
+    );
+    return {
+      thread: {
+        ...parsed.thread,
+        requests: this.mergePendingServerRequests(
+          parsed.thread.id,
+          parsed.thread.requests
+        )
+      }
+    };
+  }
+
+  private handleServerRequest(request: AppServerServerRequestMessage): void {
+    const parsed = parseWithSchema(
+      AppServerServerRequestSchema,
+      request,
+      "AppServerServerRequest"
+    );
+    const threadId = this.readThreadIdFromServerRequest(parsed);
+    if (!threadId) {
+      return;
+    }
+
+    const requestKey = `${parsed.id}`;
+    const existing = this.pendingServerRequestsByThreadId.get(threadId);
+    if (existing) {
+      existing.set(requestKey, parsed);
+      return;
+    }
+
+    this.pendingServerRequestsByThreadId.set(
+      threadId,
+      new Map([[requestKey, parsed]])
+    );
+  }
+
+  private readThreadIdFromServerRequest(
+    request: AppServerServerRequest
+  ): string | null {
+    switch (request.method) {
+      case "item/commandExecution/requestApproval":
+      case "item/fileChange/requestApproval":
+      case "item/tool/requestUserInput":
+      case "item/tool/call":
+        return request.params.threadId;
+      default:
+        return null;
+    }
+  }
+
+  private mergePendingServerRequests(
+    threadId: string,
+    requests: AppServerReadThreadResponse["thread"]["requests"]
+  ): AppServerReadThreadResponse["thread"]["requests"] {
+    const pending = this.pendingServerRequestsByThreadId.get(threadId);
+    if (!pending || pending.size === 0) {
+      return requests;
+    }
+
+    const merged = [...requests];
+    for (const [requestKey, request] of pending.entries()) {
+      const alreadyPresent = merged.some(
+        (existingRequest) => `${existingRequest.id}` === requestKey
+      );
+      if (alreadyPresent) {
+        continue;
+      }
+      merged.push(request);
+    }
+    return merged;
+  }
+
+  private removePendingServerRequest(requestId: UserInputRequestId): void {
+    const requestKey = `${requestId}`;
+    for (const [threadId, pending] of this.pendingServerRequestsByThreadId.entries()) {
+      pending.delete(requestKey);
+      if (pending.size === 0) {
+        this.pendingServerRequestsByThreadId.delete(threadId);
+      }
+    }
   }
 }

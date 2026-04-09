@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { AppServerRpcError, DesktopIpcError } from "@farfield/api";
 import {
+  isAuthenticationRequiredToReadRateLimitsAppServerRpcError,
   isInvalidRequestAppServerRpcError,
   isIpcNoClientFoundError,
   isThreadNotLoadedAppServerRpcError,
   isThreadNoRolloutIncludeTurnsAppServerRpcError,
   isThreadNotMaterializedIncludeTurnsAppServerRpcError,
+  normalizeCodexRuntimeErrorMessage,
 } from "../src/agents/adapters/codex-agent.js";
 
 describe("isInvalidRequestAppServerRpcError", () => {
@@ -144,6 +146,40 @@ describe("isThreadNotLoadedAppServerRpcError", () => {
   });
 });
 
+describe("isAuthenticationRequiredToReadRateLimitsAppServerRpcError", () => {
+  it("returns true for rate-limits authentication errors", () => {
+    expect(
+      isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
+        new AppServerRpcError(
+          -32600,
+          "chatgpt authentication required to read rate limits",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("returns false for other errors", () => {
+    expect(
+      isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
+        new AppServerRpcError(-32600, "thread not found"),
+      ),
+    ).toBe(false);
+    expect(
+      isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
+        new AppServerRpcError(
+          -32603,
+          "chatgpt authentication required to read rate limits",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
+        new Error("chatgpt authentication required to read rate limits"),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("isIpcNoClientFoundError", () => {
   it("returns true for no-client-found desktop ipc errors", () => {
     expect(
@@ -167,5 +203,33 @@ describe("isIpcNoClientFoundError", () => {
       ),
     ).toBe(false);
     expect(isIpcNoClientFoundError(new Error("no-client-found"))).toBe(false);
+  });
+});
+
+describe("normalizeCodexRuntimeErrorMessage", () => {
+  it("rewrites rate-limits authentication errors", () => {
+    expect(
+      normalizeCodexRuntimeErrorMessage(
+        "app-server error -32600: chatgpt authentication required to read rate limits",
+      ),
+    ).toBe(
+      "Rate limits unavailable until ChatGPT authentication is connected.",
+    );
+  });
+
+  it("rewrites missing IPC socket errors", () => {
+    expect(
+      normalizeCodexRuntimeErrorMessage(
+        "connect ENOENT /tmp/codex-ipc/ipc-1000.sock",
+      ),
+    ).toBe(
+      "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings.",
+    );
+  });
+
+  it("preserves unrelated errors", () => {
+    expect(normalizeCodexRuntimeErrorMessage("thread not found")).toBe(
+      "thread not found",
+    );
   });
 });

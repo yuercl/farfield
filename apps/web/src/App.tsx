@@ -449,17 +449,30 @@ function mergeIncomingThreads(
 }
 
 function toErrorMessage(err: unknown): string {
+  const normalize = (message: string): string => {
+    if (
+      message === "Desktop IPC is not connected" ||
+      message ===
+        "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings."
+    ) {
+      return "";
+    }
+    return message;
+  };
+
   if (err instanceof Error) {
-    return err.message;
+    return normalize(err.message);
   }
   if (typeof err === "object" && err !== null && "message" in err) {
     const withMessage = err as { message?: string };
     if (typeof withMessage.message === "string") {
-      return withMessage.message;
+      return normalize(withMessage.message);
     }
   }
-  return String(err);
+  return normalize(String(err));
 }
+
+const DEFAULT_CODEX_APPROVAL_POLICY = "on-request";
 
 function buildThreadListErrorMessage(
   errors: ThreadListProviderErrors,
@@ -1383,10 +1396,29 @@ export function App(): React.JSX.Element {
   const requestSourceState = useMemo(() => {
     const liveConversationState = liveState?.conversationState ?? null;
     const readConversationState = readThreadState?.thread ?? null;
-    if (liveConversationState) {
+    if (!liveConversationState) {
+      return readConversationState;
+    }
+    if (!readConversationState) {
       return liveConversationState;
     }
-    return readConversationState;
+
+    const livePendingRequestCount =
+      getPendingThreadRequests(liveConversationState).length;
+    const readPendingRequestCount =
+      getPendingThreadRequests(readConversationState).length;
+
+    if (
+      liveConversationState.id === readConversationState.id &&
+      readPendingRequestCount > livePendingRequestCount
+    ) {
+      return {
+        ...liveConversationState,
+        requests: readConversationState.requests,
+      };
+    }
+
+    return liveConversationState;
   }, [liveState?.conversationState, readThreadState?.thread]);
 
   const pendingRequests = useMemo(() => {
@@ -1740,17 +1772,29 @@ export function App(): React.JSX.Element {
     1,
   );
   const codexConfigured = agentsById.codex?.enabled === true;
+  const codexConnected = agentsById.codex?.connected === true;
   const openCodeConnected = agentsById.opencode?.connected === true;
-  const allSystemsReady = codexConfigured
+  const connectedEnabledAgentCount = agentDescriptors.filter(
+    (descriptor) => descriptor.enabled && descriptor.connected,
+  ).length;
+  const codexDesktopUnavailable =
+    codexConfigured && !codexConnected && connectedEnabledAgentCount > 0;
+  const visibleHealthError =
+    health?.state.lastError === "Desktop IPC is not connected" ||
+    health?.state.lastError ===
+      "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings."
+      ? null
+      : health?.state.lastError ?? null;
+  const allSystemsReady = codexConnected
     ? health?.state.appReady === true &&
       health?.state.ipcConnected === true &&
       health?.state.ipcInitialized === true
-    : openCodeConnected;
-  const hasAnySystemFailure = codexConfigured
+    : connectedEnabledAgentCount > 0 || openCodeConnected;
+  const hasAnySystemFailure = codexConnected
     ? health?.state.appReady === false ||
       health?.state.ipcConnected === false ||
       health?.state.ipcInitialized === false
-    : !openCodeConnected;
+    : connectedEnabledAgentCount === 0 && !openCodeConnected;
   /* Data loading */
   const loadCoreData = useCallback(async () => {
     const shouldLoadDebugData = activeTabRef.current === "debug";
@@ -3332,6 +3376,9 @@ export function App(): React.JSX.Element {
         const created = await createThread({
           cwd: trimmedProjectPath,
           agentId: targetAgentId,
+          ...(targetAgentId === "codex"
+            ? { approvalPolicy: DEFAULT_CODEX_APPROVAL_POLICY }
+            : {}),
         });
         threadProviderByIdRef.current.set(created.threadId, targetAgentId);
         optimisticSelectedThreadIdsRef.current.add(created.threadId);
@@ -3959,7 +4006,7 @@ export function App(): React.JSX.Element {
                     {descriptor.connected ? "connected" : "disconnected"}
                   </div>
                 ))}
-              {codexConfigured ? (
+              {codexConnected ? (
                 <>
                   <div>App: {health?.state.appReady ? "ok" : "not ready"}</div>
                   <div>
@@ -3971,9 +4018,14 @@ export function App(): React.JSX.Element {
                   </div>
                 </>
               ) : null}
-              {health?.state.lastError && (
+              {codexDesktopUnavailable ? (
+                <div className="max-w-64 break-words text-muted-foreground">
+                  Codex Desktop is unavailable on this host.
+                </div>
+              ) : null}
+              {visibleHealthError && (
                 <div className="max-w-64 break-words text-destructive">
-                  Error: {health.state.lastError}
+                  Error: {visibleHealthError}
                 </div>
               )}
               <div className="text-muted-foreground">

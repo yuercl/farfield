@@ -10,9 +10,16 @@ import { JsonRpcRequestSchema, parseJsonRpcIncomingMessage } from "./json-rpc.js
 
 export type AppServerRequestId = string | number;
 
+export interface AppServerServerRequestMessage {
+  id: AppServerRequestId;
+  method: string;
+  params: unknown;
+}
+
 export interface AppServerTransport {
   request(method: AppServerClientRequestMethod, params: unknown, timeoutMs?: number): Promise<unknown>;
   respond(requestId: AppServerRequestId, result: unknown): Promise<void>;
+  setServerRequestHandler?(handler: ((request: AppServerServerRequestMessage) => void) | null): void;
   close(): Promise<void>;
 }
 
@@ -38,6 +45,7 @@ export class ChildProcessAppServerTransport implements AppServerTransport {
   private readonly env: NodeJS.ProcessEnv | undefined;
   private readonly requestTimeoutMs: number;
   private readonly onStderr: ((line: string) => void) | undefined;
+  private serverRequestHandler: ((request: AppServerServerRequestMessage) => void) | null = null;
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<number, PendingRequest>();
   private requestId = 0;
@@ -95,6 +103,15 @@ export class ChildProcessAppServerTransport implements AppServerTransport {
       const message = parseJsonRpcIncomingMessage(raw);
 
       if (message.kind === "notification") {
+        return;
+      }
+
+      if (message.kind === "request") {
+        this.serverRequestHandler?.({
+          id: message.value.id,
+          method: message.value.method,
+          params: message.value.params
+        });
         return;
       }
 
@@ -238,6 +255,12 @@ export class ChildProcessAppServerTransport implements AppServerTransport {
       this.initialized = true;
     }
     return result;
+  }
+
+  public setServerRequestHandler(
+    handler: ((request: AppServerServerRequestMessage) => void) | null
+  ): void {
+    this.serverRequestHandler = handler;
   }
 
   public async respond(requestId: AppServerRequestId, result: unknown): Promise<void> {

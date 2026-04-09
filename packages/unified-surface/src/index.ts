@@ -602,7 +602,7 @@ const UnifiedCommandExecutionItemSchema = z
     type: z.literal("commandExecution"),
     command: z.string(),
     cwd: z.string().optional(),
-    processId: z.string().optional(),
+    processId: NullableStringSchema.optional(),
     status: NonEmptyStringSchema,
     commandActions: z.array(UnifiedCommandActionSchema).optional(),
     aggregatedOutput: z.union([z.string(), z.null()]).optional(),

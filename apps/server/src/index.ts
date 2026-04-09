@@ -23,7 +23,10 @@ import {
 } from "./agents/cli-options.js";
 import { AgentRegistry } from "./agents/registry.js";
 import { ThreadIndex } from "./agents/thread-index.js";
-import { CodexAgentAdapter } from "./agents/adapters/codex-agent.js";
+import {
+  CodexAgentAdapter,
+  isAuthenticationRequiredToReadRateLimitsAppServerRpcError,
+} from "./agents/adapters/codex-agent.js";
 import { OpenCodeAgentAdapter } from "./agents/adapters/opencode-agent.js";
 import type { AgentAdapter } from "./agents/types.js";
 import {
@@ -1060,6 +1063,18 @@ const server = http.createServer(async (req, res) => {
         const result = await adapter.readRateLimits();
         jsonResponse(res, 200, { ok: true, ...result });
       } catch (error) {
+        if (
+          isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
+            error instanceof Error ? error : null,
+          )
+        ) {
+          jsonResponse(res, 200, {
+            ok: true,
+            rateLimits: {},
+            rateLimitsByLimitId: null,
+          });
+          return;
+        }
         const message = toErrorMessage(error);
         logger.warn({ error: message }, "rate-limits-read-failed");
         jsonResponse(res, 500, { ok: false, error: message });

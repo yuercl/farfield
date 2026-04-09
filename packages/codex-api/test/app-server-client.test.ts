@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { AppServerClient } from "../src/app-server-client.js";
-import type { AppServerTransport } from "../src/app-server-transport.js";
+import type {
+  AppServerServerRequestMessage,
+  AppServerTransport,
+} from "../src/app-server-transport.js";
 
 const START_THREAD_RESPONSE = {
   thread: {
@@ -193,5 +196,85 @@ describe("AppServerClient.submitUserInput", () => {
     expect(transport.respond).toHaveBeenCalledWith(42, {
       decision: "accept",
     });
+  });
+});
+
+describe("AppServerClient server requests", () => {
+  it("merges pending app-server approval requests into readThread results", async () => {
+    let handler: ((request: AppServerServerRequestMessage) => void) | null = null;
+    const transport: AppServerTransport = {
+      request: vi.fn().mockResolvedValue({
+        thread: {
+          id: "thread-1",
+          turns: [],
+          requests: [],
+        },
+      }),
+      respond: vi.fn().mockResolvedValue(undefined),
+      setServerRequestHandler: vi.fn().mockImplementation((nextHandler) => {
+        handler = nextHandler;
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const client = new AppServerClient(transport);
+    handler?.({
+      id: 41,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        command: "touch /tmp/farfield-approval-test",
+      },
+    });
+
+    const result = await client.readThread("thread-1", true);
+
+    expect(result.thread.requests).toHaveLength(1);
+    expect(result.thread.requests[0]?.method).toBe(
+      "item/commandExecution/requestApproval",
+    );
+    expect(result.thread.requests[0]?.id).toBe(41);
+  });
+
+  it("removes pending app-server requests after responding", async () => {
+    let handler: ((request: AppServerServerRequestMessage) => void) | null = null;
+    const transport: AppServerTransport = {
+      request: vi.fn().mockResolvedValue({
+        thread: {
+          id: "thread-1",
+          turns: [],
+          requests: [],
+        },
+      }),
+      respond: vi.fn().mockResolvedValue(undefined),
+      setServerRequestHandler: vi.fn().mockImplementation((nextHandler) => {
+        handler = nextHandler;
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const client = new AppServerClient(transport);
+    handler?.({
+      id: 42,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        command: "touch /tmp/farfield-approval-test",
+      },
+    });
+
+    await client.submitUserInput(42, {
+      decision: "accept",
+    });
+    const result = await client.readThread("thread-1", true);
+
+    expect(transport.respond).toHaveBeenCalledWith(42, {
+      decision: "accept",
+    });
+    expect(result.thread.requests).toHaveLength(0);
   });
 });

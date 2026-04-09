@@ -128,6 +128,7 @@ export const AppServerSetModeRequestSchema = z
 export type AppServerListThreadsResponse = z.infer<typeof AppServerListThreadsResponseSchema>;
 export type AppServerReadThreadResponse = z.infer<typeof AppServerReadThreadResponseSchema>;
 export type AppServerListModelsResponse = z.infer<typeof AppServerListModelsResponseSchema>;
+export type AppServerServerRequest = z.infer<typeof AppServerServerRequestSchema>;
 export type AppServerCollaborationModeListResponse = z.infer<
   typeof AppServerCollaborationModeListResponseSchema
 >;

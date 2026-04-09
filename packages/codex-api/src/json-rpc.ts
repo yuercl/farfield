@@ -4,11 +4,13 @@ import { ProtocolValidationError } from "@farfield/protocol";
 export const JsonRpcRequestSchema = z
   .object({
     jsonrpc: z.literal("2.0"),
-    id: z.number().int().nonnegative(),
+    id: z.union([z.number().int().nonnegative(), z.string()]),
     method: z.string().min(1),
     params: z.unknown().optional()
   })
   .passthrough();
+
+export type JsonRpcRequest = z.infer<typeof JsonRpcRequestSchema>;
 
 export const JsonRpcResponseSchema = z
   .object({
@@ -55,10 +57,19 @@ export const JsonRpcNotificationSchema = z
 export type JsonRpcNotification = z.infer<typeof JsonRpcNotificationSchema>;
 
 export type JsonRpcIncomingMessage =
+  | { kind: "request"; value: JsonRpcRequest }
   | { kind: "response"; value: JsonRpcResponse }
   | { kind: "notification"; value: JsonRpcNotification };
 
 export function parseJsonRpcIncomingMessage(value: unknown): JsonRpcIncomingMessage {
+  const parsedRequest = JsonRpcRequestSchema.safeParse(value);
+  if (parsedRequest.success) {
+    return {
+      kind: "request",
+      value: parsedRequest.data
+    };
+  }
+
   const parsedResponse = JsonRpcResponseSchema.safeParse(value);
   if (parsedResponse.success) {
     return {
@@ -76,6 +87,7 @@ export function parseJsonRpcIncomingMessage(value: unknown): JsonRpcIncomingMess
   }
 
   const combinedError = new z.ZodError([
+    ...parsedRequest.error.issues,
     ...parsedResponse.error.issues,
     ...parsedNotification.error.issues
   ]);

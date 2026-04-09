@@ -72,6 +72,22 @@ export interface CodexAgentOptions {
 
 const ANSI_ESCAPE_REGEX = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 
+export function normalizeCodexRuntimeErrorMessage(message: string): string {
+  const normalized = message.trim().toLowerCase();
+  if (
+    normalized.includes("authentication required") &&
+    normalized.includes("read rate limits")
+  ) {
+    return "Rate limits unavailable until ChatGPT authentication is connected.";
+  }
+
+  if (normalized.includes("connect enoent") && normalized.includes("codex-ipc")) {
+    return "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings.";
+  }
+
+  return message;
+}
+
 export class CodexAgentAdapter implements AgentAdapter {
   public readonly id = "codex";
   public readonly label = "Codex";
@@ -144,7 +160,9 @@ export class CodexAgentAdapter implements AgentAdapter {
         ipcInitialized: state.connected
           ? this.runtimeState.ipcInitialized
           : false,
-        ...(state.reason ? { lastError: state.reason } : {}),
+        ...(state.reason
+          ? { lastError: normalizeCodexRuntimeErrorMessage(state.reason) }
+          : {}),
       });
 
       if (!state.connected) {
@@ -386,6 +404,7 @@ export class CodexAgentAdapter implements AgentAdapter {
         ...(input.approvalPolicy
           ? { approvalPolicy: input.approvalPolicy }
           : {}),
+        ...(input.serviceName ? { serviceName: input.serviceName } : {}),
         ephemeral: input.ephemeral ?? false,
       }),
     );
@@ -576,7 +595,34 @@ export class CodexAgentAdapter implements AgentAdapter {
     import("@farfield/protocol").AppServerGetAccountRateLimitsResponse
   > {
     this.ensureCodexAvailable();
-    return this.runAppServerCall(() => this.appClient.readAccountRateLimits());
+    try {
+      const result = await this.appClient.readAccountRateLimits();
+      this.patchRuntimeState({
+        appReady: true,
+        lastError: null,
+      });
+      return result;
+    } catch (error) {
+      if (
+        isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
+          error instanceof Error ? error : null,
+        )
+      ) {
+        this.patchRuntimeState({
+          appReady: true,
+          lastError: null,
+        });
+        return {
+          rateLimits: {},
+          rateLimitsByLimitId: null,
+        };
+      }
+      this.patchRuntimeState({
+        appReady: !(error instanceof AppServerTransportError),
+        lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error)),
+      });
+      throw error;
+    }
   }
 
   public async setCollaborationMode(
@@ -996,7 +1042,7 @@ export class CodexAgentAdapter implements AgentAdapter {
     } catch (error) {
       this.patchRuntimeState({
         appReady: !(error instanceof AppServerTransportError),
-        lastError: toErrorMessage(error),
+        lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error)),
       });
       throw error;
     }
@@ -1024,7 +1070,7 @@ export class CodexAgentAdapter implements AgentAdapter {
         if (isSpawnError) {
           this.patchRuntimeState({
             codexAvailable: false,
-            lastError: message,
+            lastError: normalizeCodexRuntimeErrorMessage(message),
           });
           logger.warn({ error: message }, "codex-not-found");
         }
@@ -1051,7 +1097,7 @@ export class CodexAgentAdapter implements AgentAdapter {
         this.patchRuntimeState({
           ipcInitialized: false,
           ipcConnected: this.ipcClient.isConnected(),
-          lastError: toErrorMessage(error),
+          lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error)),
         });
         this.scheduleIpcReconnect();
       } finally {
@@ -1294,6 +1340,22 @@ export function isThreadNoRolloutIncludeTurnsAppServerRpcError(
   return (
     normalized.includes("no rollout found for thread id") &&
     normalized.includes("app-server error -32600")
+  );
+}
+
+export function isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
+  error: Error | null,
+): boolean {
+  if (!isInvalidRequestAppServerRpcError(error)) {
+    return false;
+  }
+  if (!error) {
+    return false;
+  }
+  const normalized = error.message.trim().toLowerCase();
+  return (
+    normalized.includes("authentication required") &&
+    normalized.includes("read rate limits")
   );
 }
 

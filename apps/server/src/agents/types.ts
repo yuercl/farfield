@@ -38,6 +38,7 @@ export interface AgentCreateThreadInput {
   personality?: string;
   sandbox?: string;
   approvalPolicy?: string;
+  serviceName?: string;
   ephemeral?: boolean;
 }
 
