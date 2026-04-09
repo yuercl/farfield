@@ -200,6 +200,23 @@ const DirectoryCreateResponseSchema = z
   })
   .strict();
 
+const DirectoryEntrySchema = z
+  .object({
+    name: z.string(),
+    path: z.string(),
+    kind: z.literal("directory"),
+  })
+  .strict();
+
+const DirectoryReadResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    path: z.string(),
+    parentPath: z.string().nullable(),
+    entries: z.array(DirectoryEntrySchema),
+  })
+  .strict();
+
 const HistoryEntrySummarySchema = z
   .object({
     id: z.string(),
@@ -1072,6 +1089,23 @@ export async function createServerDirectory(input: {
       }),
     },
     input.baseUrlOverride,
+  );
+}
+
+export async function readServerDirectory(input?: {
+  path?: string;
+  baseUrlOverride?: string;
+}): Promise<z.infer<typeof DirectoryReadResponseSchema>> {
+  const params = new URLSearchParams();
+  if (input?.path) {
+    params.set("path", input.path);
+  }
+  const query = params.toString();
+  return requestEnvelope(
+    `/api/filesystem/directory${query.length > 0 ? `?${query}` : ""}`,
+    DirectoryReadResponseSchema,
+    undefined,
+    input?.baseUrlOverride,
   );
 }
 

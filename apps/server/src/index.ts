@@ -13,7 +13,9 @@ import {
 } from "@farfield/unified-surface";
 import {
   DirectoryCreateBodySchema,
+  DirectoryReadQuerySchema,
   parseBody,
+  parseQuery,
   TraceMarkBodySchema,
   TraceStartBodySchema,
 } from "./http-schemas.js";
@@ -101,6 +103,16 @@ function resolveIpcSocketPath(): string {
 
   const uid = process.getuid?.() ?? 0;
   return path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`);
+}
+
+function resolveCodexAppServerUrl(): string | null {
+  const raw = process.env["CODEX_APP_SERVER_URL"];
+  if (!raw) {
+    return null;
+  }
+
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function resolveGitCommitHash(): string | null {
@@ -238,6 +250,7 @@ if (parsedCli.showHelp) {
 const configuredAgentIds = parsedCli.agentIds;
 const configuredUnifiedProviders: UnifiedProviderId[] = [...configuredAgentIds];
 const codexExecutable = resolveCodexExecutablePath();
+const codexAppServerUrl = resolveCodexAppServerUrl();
 const ipcSocketPath = resolveIpcSocketPath();
 const gitCommit = resolveGitCommitHash();
 
@@ -306,6 +319,7 @@ for (const agentId of configuredAgentIds) {
   if (agentId === "codex") {
     codexAdapter = new CodexAgentAdapter({
       appExecutable: codexExecutable,
+      ...(codexAppServerUrl ? { appServerUrl: codexAppServerUrl } : {}),
       socketPath: ipcSocketPath,
       workspaceDir: DEFAULT_WORKSPACE,
       userAgent: USER_AGENT,
@@ -343,6 +357,7 @@ function getRuntimeStateSnapshot(): Record<string, unknown> {
 
   return {
     appExecutable: codexExecutable,
+    ...(codexAppServerUrl ? { appServerUrl: codexAppServerUrl } : {}),
     socketPath: ipcSocketPath,
     gitCommit,
     appReady: codexRuntimeState?.appReady ?? false,
@@ -563,6 +578,46 @@ const server = http.createServer(async (req, res) => {
       jsonResponse(res, 200, {
         ok: true,
         path: resolvedPath,
+      });
+      return;
+    }
+
+    if (req.method === "GET" && pathname === "/api/filesystem/directory") {
+      const query = parseQuery(DirectoryReadQuerySchema, {
+        path: url.searchParams.get("path") ?? undefined,
+      });
+      const requestedPath =
+        typeof query.path === "string" && query.path.length > 0
+          ? query.path
+          : DEFAULT_WORKSPACE;
+      const resolvedPath = path.isAbsolute(requestedPath)
+        ? path.normalize(requestedPath)
+        : path.resolve(DEFAULT_WORKSPACE, requestedPath);
+      const stats = fs.statSync(resolvedPath);
+      if (!stats.isDirectory()) {
+        jsonResponse(res, 400, {
+          ok: false,
+          error: "Requested path is not a directory",
+        });
+        return;
+      }
+
+      const entries = fs
+        .readdirSync(resolvedPath, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({
+          name: entry.name,
+          path: path.join(resolvedPath, entry.name),
+          kind: "directory" as const,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name));
+
+      const parentPath = path.dirname(resolvedPath);
+      jsonResponse(res, 200, {
+        ok: true,
+        path: resolvedPath,
+        parentPath: parentPath === resolvedPath ? null : parentPath,
+        entries,
       });
       return;
     }

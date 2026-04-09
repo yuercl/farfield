@@ -46,6 +46,7 @@ import {
   listAgentsForBaseUrl,
   listSavedServerTargets,
   readThread,
+  readServerDirectory,
   removeNamedServerTarget,
   getTraceStatus,
   interruptThread,
@@ -241,6 +242,16 @@ interface NewThreadModalState {
   serverId: string;
   agentId: AgentId;
   projectPath: string;
+}
+
+interface DirectoryBrowserState {
+  path: string;
+  parentPath: string | null;
+  entries: Array<{
+    name: string;
+    path: string;
+    kind: "directory";
+  }>;
 }
 
 /* ── Helpers ────────────────────────────────────────────────── */
@@ -726,6 +737,10 @@ function buildModeSignature(
   effort: string,
 ): string {
   return `${modeKey}|${modelId}|${effort}`;
+}
+
+function parseAgentId(value: string): AgentId | null {
+  return value === "codex" || value === "opencode" ? value : null;
 }
 
 function getConversationStateUpdatedAt(
@@ -1238,6 +1253,10 @@ export function App(): React.JSX.Element {
   const [isLoadingNewThreadAgents, setIsLoadingNewThreadAgents] =
     useState(false);
   const [isCreatingDirectory, setIsCreatingDirectory] = useState(false);
+  const [isLoadingDirectoryBrowser, setIsLoadingDirectoryBrowser] =
+    useState(false);
+  const [directoryBrowserState, setDirectoryBrowserState] =
+    useState<DirectoryBrowserState | null>(null);
 
   /* UI state */
   const [activeTab, setActiveTab] = useState<"chat" | "debug">(
@@ -2710,6 +2729,36 @@ export function App(): React.JSX.Element {
     selectedNewThreadServer,
   ]);
 
+  const browseDirectory = useCallback(
+    async (pathValue?: string) => {
+      if (!selectedNewThreadServer) {
+        return;
+      }
+      setIsLoadingDirectoryBrowser(true);
+      try {
+        const result = await readServerDirectory({
+          baseUrlOverride: selectedNewThreadServer.baseUrl,
+          ...(pathValue ? { path: pathValue } : {}),
+        });
+        setDirectoryBrowserState(result);
+      } catch (error) {
+        setDirectoryBrowserState(null);
+        setError(toErrorMessage(error));
+      } finally {
+        setIsLoadingDirectoryBrowser(false);
+      }
+    },
+    [selectedNewThreadServer],
+  );
+
+  useEffect(() => {
+    if (!isNewThreadModalOpen || !selectedNewThreadServer) {
+      return;
+    }
+
+    void browseDirectory(newThreadModalState.projectPath.trim() || undefined);
+  }, [browseDirectory, isNewThreadModalOpen, selectedNewThreadServer]);
+
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
@@ -3821,12 +3870,12 @@ export function App(): React.JSX.Element {
       return;
     }
 
-    setIsNewThreadModalOpen(false);
     await createNewThread(
       projectPath,
       newThreadModalState.agentId,
       selectedNewThreadServer,
     );
+    setIsNewThreadModalOpen(false);
   }, [createNewThread, newThreadModalState, selectedNewThreadServer]);
 
   const createDirectoryForNewThread = useCallback(async () => {
@@ -3852,12 +3901,20 @@ export function App(): React.JSX.Element {
         ...previous,
         projectPath: result.path,
       }));
+      await browseDirectory(result.path);
     } catch (error) {
       setError(toErrorMessage(error));
     } finally {
       setIsCreatingDirectory(false);
     }
-  }, [newThreadModalState.projectPath, selectedNewThreadServer]);
+  }, [browseDirectory, newThreadModalState.projectPath, selectedNewThreadServer]);
+
+  const useBrowsedDirectoryForNewThread = useCallback((pathValue: string) => {
+    setNewThreadModalState((previous) => ({
+      ...previous,
+      projectPath: pathValue,
+    }));
+  }, []);
 
   const beginOpenSidebarSwipe = useCallback(
     (event: React.TouchEvent<HTMLDivElement>) => {
@@ -5305,9 +5362,13 @@ export function App(): React.JSX.Element {
                   <Select
                     value={newThreadModalState.agentId}
                     onValueChange={(value) => {
+                      const nextAgentId = parseAgentId(value);
+                      if (!nextAgentId) {
+                        return;
+                      }
                       setNewThreadModalState((previous) => ({
                         ...previous,
-                        agentId: value as AgentId,
+                        agentId: nextAgentId,
                       }));
                     }}
                     disabled={isLoadingNewThreadAgents}
@@ -5351,6 +5412,90 @@ export function App(): React.JSX.Element {
                   <div className="text-xs text-muted-foreground">
                     Existing directories appear as suggestions. You can also type
                     a new path.
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-sm font-medium">
+                      Browse Directories
+                    </Label>
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-7 px-2 text-[11px]"
+                        disabled={
+                          isLoadingDirectoryBrowser ||
+                          directoryBrowserState?.parentPath === null
+                        }
+                        onClick={() => {
+                          if (!directoryBrowserState?.parentPath) {
+                            return;
+                          }
+                          void browseDirectory(directoryBrowserState.parentPath);
+                        }}
+                      >
+                        Up
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-7 px-2 text-[11px]"
+                        onClick={() => {
+                          void browseDirectory(
+                            newThreadModalState.projectPath.trim() || undefined,
+                          );
+                        }}
+                        disabled={isLoadingDirectoryBrowser}
+                      >
+                        Browse Path
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border">
+                    <div className="border-b border-border px-3 py-2 text-[11px] text-muted-foreground break-all">
+                      {directoryBrowserState?.path ?? "No directory loaded"}
+                    </div>
+                    <div className="max-h-48 overflow-y-auto">
+                      {isLoadingDirectoryBrowser ? (
+                        <div className="px-3 py-4 text-xs text-muted-foreground">
+                          Loading directories...
+                        </div>
+                      ) : directoryBrowserState?.entries.length ? (
+                        directoryBrowserState.entries.map((entry) => (
+                          <div
+                            key={entry.path}
+                            className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-2 last:border-b-0"
+                          >
+                            <button
+                              type="button"
+                              className="min-w-0 flex-1 truncate text-left text-sm text-foreground hover:text-primary"
+                              onClick={() => {
+                                void browseDirectory(entry.path);
+                              }}
+                            >
+                              {entry.name}
+                            </button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={() => {
+                                useBrowsedDirectoryForNewThread(entry.path);
+                              }}
+                            >
+                              Use
+                            </Button>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="px-3 py-4 text-xs text-muted-foreground">
+                          No subdirectories found.
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 

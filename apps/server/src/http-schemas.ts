@@ -25,6 +25,12 @@ export const AgentScopedQuerySchema = z
   })
   .strict();
 
+export const DirectoryReadQuerySchema = z
+  .object({
+    path: z.string().trim().min(1).optional(),
+  })
+  .strict();
+
 export function parseBody<Schema extends z.ZodTypeAny>(
   schema: Schema,
   value: unknown,
