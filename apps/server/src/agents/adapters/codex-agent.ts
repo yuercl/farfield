@@ -2,11 +2,13 @@ import {
   AppServerClient,
   AppServerRpcError,
   AppServerTransportError,
+  ChildProcessAppServerTransport,
   CodexMonitorService,
   DesktopIpcError,
   DesktopIpcClient,
   reduceThreadStreamEvents,
   ThreadStreamReductionError,
+  WebSocketAppServerTransport,
   type SendRequestOptions,
 } from "@farfield/api";
 import {
@@ -67,6 +69,7 @@ export interface CodexAgentOptions {
   workspaceDir: string;
   userAgent: string;
   reconnectDelayMs: number;
+  appServerUrl?: string;
   onStateChange?: () => void;
 }
 
@@ -106,6 +109,7 @@ export class CodexAgentAdapter implements AgentAdapter {
   private readonly service: CodexMonitorService;
   private readonly onStateChange: (() => void) | null;
   private readonly reconnectDelayMs: number;
+  private readonly desktopIpcEnabled: boolean;
 
   private readonly threadOwnerById = new Map<string, string>();
   private readonly streamEventsByThreadId = new Map<string, IpcFrame[]>();
@@ -138,21 +142,37 @@ export class CodexAgentAdapter implements AgentAdapter {
   public constructor(options: CodexAgentOptions) {
     this.onStateChange = options.onStateChange ?? null;
     this.reconnectDelayMs = options.reconnectDelayMs;
+    this.desktopIpcEnabled = !options.appServerUrl;
 
-    this.appClient = new AppServerClient({
-      executablePath: options.appExecutable,
-      userAgent: options.userAgent,
-      cwd: options.workspaceDir,
-      onStderr: (line) => {
-        const normalized = normalizeStderrLine(line);
-        logger.error({ line: normalized }, "codex-app-server-stderr");
-      },
-    });
+    this.appClient = new AppServerClient(
+      options.appServerUrl
+        ? new WebSocketAppServerTransport({
+            url: options.appServerUrl,
+            userAgent: options.userAgent,
+          })
+        : new ChildProcessAppServerTransport({
+            executablePath: options.appExecutable,
+            userAgent: options.userAgent,
+            cwd: options.workspaceDir,
+            onStderr: (line) => {
+              const normalized = normalizeStderrLine(line);
+              logger.error({ line: normalized }, "codex-app-server-stderr");
+            },
+          }),
+    );
 
     this.ipcClient = new DesktopIpcClient({
       socketPath: options.socketPath,
     });
     this.service = new CodexMonitorService(this.ipcClient);
+
+    if (!this.desktopIpcEnabled) {
+      this.patchRuntimeState({
+        ipcConnected: true,
+        ipcInitialized: true,
+      });
+      return;
+    }
 
     this.ipcClient.onConnectionState((state) => {
       this.patchRuntimeState({
@@ -280,7 +300,11 @@ export class CodexAgentAdapter implements AgentAdapter {
   }
 
   public isIpcReady(): boolean {
-    return this.runtimeState.ipcConnected && this.runtimeState.ipcInitialized;
+    return (
+      this.desktopIpcEnabled &&
+      this.runtimeState.ipcConnected &&
+      this.runtimeState.ipcInitialized
+    );
   }
 
   public async start(): Promise<void> {
@@ -296,7 +320,9 @@ export class CodexAgentAdapter implements AgentAdapter {
       this.reconnectTimer = null;
     }
 
-    await this.ipcClient.disconnect();
+    if (this.desktopIpcEnabled) {
+      await this.ipcClient.disconnect();
+    }
     await this.appClient.close();
   }
 
@@ -400,10 +426,8 @@ export class CodexAgentAdapter implements AgentAdapter {
         ...(input.model ? { model: input.model } : {}),
         ...(input.modelProvider ? { modelProvider: input.modelProvider } : {}),
         ...(input.personality ? { personality: input.personality } : {}),
-        ...(input.sandbox ? { sandbox: input.sandbox } : {}),
-        ...(input.approvalPolicy
-          ? { approvalPolicy: input.approvalPolicy }
-          : {}),
+        sandbox: input.sandbox ?? "danger-full-access",
+        approvalPolicy: input.approvalPolicy ?? "never",
         ...(input.serviceName ? { serviceName: input.serviceName } : {}),
         ephemeral: input.ephemeral ?? false,
       }),
@@ -1009,6 +1033,11 @@ export class CodexAgentAdapter implements AgentAdapter {
   }
 
   private ensureIpcReady(): void {
+    if (!this.desktopIpcEnabled) {
+      throw new Error(
+        "Desktop IPC is unavailable for remote Codex app-server connections",
+      );
+    }
     if (!this.isIpcReady()) {
       throw new Error(
         this.runtimeState.lastError ?? "Desktop IPC is not connected",
@@ -1077,6 +1106,15 @@ export class CodexAgentAdapter implements AgentAdapter {
       }
 
       if (!this.runtimeState.codexAvailable) {
+        this.bootstrapInFlight = null;
+        return;
+      }
+
+      if (!this.desktopIpcEnabled) {
+        this.patchRuntimeState({
+          ipcConnected: true,
+          ipcInitialized: true,
+        });
         this.bootstrapInFlight = null;
         return;
       }

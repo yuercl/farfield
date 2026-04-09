@@ -472,7 +472,8 @@ function toErrorMessage(err: unknown): string {
   return normalize(String(err));
 }
 
-const DEFAULT_CODEX_APPROVAL_POLICY = "on-request";
+const DEFAULT_CODEX_APPROVAL_POLICY = "never";
+const DEFAULT_CODEX_SANDBOX = "danger-full-access";
 
 function buildThreadListErrorMessage(
   errors: ThreadListProviderErrors,
@@ -1388,10 +1389,28 @@ export function App(): React.JSX.Element {
   const conversationState = useMemo(() => {
     const liveConversationState = liveState?.conversationState ?? null;
     const readConversationState = readThreadState?.thread ?? null;
-    if (liveConversationState !== null) {
+    if (!liveConversationState) {
+      return readConversationState;
+    }
+    if (!readConversationState) {
       return liveConversationState;
     }
-    return readConversationState;
+
+    if (
+      liveConversationState.id === readConversationState.id &&
+      readConversationState.turns.length > liveConversationState.turns.length
+    ) {
+      return {
+        ...readConversationState,
+        requests:
+          liveConversationState.requests.length >
+          readConversationState.requests.length
+            ? liveConversationState.requests
+            : readConversationState.requests,
+      };
+    }
+
+    return liveConversationState;
   }, [liveState?.conversationState, readThreadState?.thread]);
   const requestSourceState = useMemo(() => {
     const liveConversationState = liveState?.conversationState ?? null;
@@ -3377,7 +3396,10 @@ export function App(): React.JSX.Element {
           cwd: trimmedProjectPath,
           agentId: targetAgentId,
           ...(targetAgentId === "codex"
-            ? { approvalPolicy: DEFAULT_CODEX_APPROVAL_POLICY }
+            ? {
+                approvalPolicy: DEFAULT_CODEX_APPROVAL_POLICY,
+                sandbox: DEFAULT_CODEX_SANDBOX,
+              }
             : {}),
         });
         threadProviderByIdRef.current.set(created.threadId, targetAgentId);
