@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import { GitBranch, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, GitBranch, X } from "lucide-react";
 import type { UnifiedItem, UnifiedItemKind } from "@farfield/unified-surface";
 import { ReasoningBlock } from "./ReasoningBlock";
 import { CommandBlock } from "./CommandBlock";
@@ -72,16 +72,41 @@ function ImagePreview({
 }: {
   images: Array<{ url: string }>;
 }): React.JSX.Element | null {
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const activeImage = previewIndex === null ? null : images[previewIndex] ?? null;
+
+  const showPrevious = () => {
+    if (previewIndex === null) {
+      return;
+    }
+    setPreviewIndex((previewIndex + images.length - 1) % images.length);
+  };
+
+  const showNext = () => {
+    if (previewIndex === null) {
+      return;
+    }
+    setPreviewIndex((previewIndex + 1) % images.length);
+  };
 
   useEffect(() => {
-    if (previewUrl === null) {
+    if (previewIndex === null) {
       return;
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setPreviewUrl(null);
+        setPreviewIndex(null);
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        showPrevious();
+        return;
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        showNext();
       }
     };
 
@@ -89,7 +114,7 @@ function ImagePreview({
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [previewUrl]);
+  }, [previewIndex, showNext, showPrevious]);
 
   if (images.length === 0) {
     return null;
@@ -103,7 +128,7 @@ function ImagePreview({
             key={`${image.url}-${String(index)}`}
             type="button"
             onClick={() => {
-              setPreviewUrl(image.url);
+              setPreviewIndex(index);
             }}
             className="overflow-hidden rounded-xl border border-border/60 text-left transition hover:border-border hover:opacity-95"
             title="Open image preview"
@@ -120,11 +145,11 @@ function ImagePreview({
         ))}
       </div>
 
-      {previewUrl && (
+      {activeImage && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4"
           onClick={() => {
-            setPreviewUrl(null);
+            setPreviewIndex(null);
           }}
         >
           <button
@@ -132,21 +157,84 @@ function ImagePreview({
             className="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
             onClick={(event) => {
               event.stopPropagation();
-              setPreviewUrl(null);
+              setPreviewIndex(null);
             }}
             aria-label="Close image preview"
             title="Close image preview"
           >
             <X size={18} />
           </button>
-          <img
-            src={previewUrl}
-            alt="Image preview"
-            className="max-h-[90vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl"
+          {images.length > 1 && (
+            <button
+              type="button"
+              className="absolute left-4 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
+              onClick={(event) => {
+                event.stopPropagation();
+                showPrevious();
+              }}
+              aria-label="Previous image"
+              title="Previous image"
+            >
+              <ChevronLeft size={20} />
+            </button>
+          )}
+          <div
+            className="flex max-h-[90vh] max-w-[90vw] flex-col items-center gap-4"
             onClick={(event) => {
               event.stopPropagation();
             }}
-          />
+          >
+            <img
+              src={activeImage.url}
+              alt="Image preview"
+              className="max-h-[78vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl"
+            />
+            {images.length > 1 && (
+              <div className="flex max-w-[90vw] gap-2 overflow-x-auto rounded-2xl bg-white/10 px-3 py-2">
+                {images.map((image, index) => {
+                  const isActive = index === previewIndex;
+                  return (
+                    <button
+                      key={`${image.url}-thumbnail-${String(index)}`}
+                      type="button"
+                      onClick={() => {
+                        setPreviewIndex(index);
+                      }}
+                      className={`overflow-hidden rounded-xl border transition ${
+                        isActive
+                          ? "border-white"
+                          : "border-white/20 hover:border-white/50"
+                      }`}
+                      aria-label={`Preview image ${String(index + 1)}`}
+                      title={`Preview image ${String(index + 1)}`}
+                    >
+                      <img
+                        src={image.url}
+                        alt={`Thumbnail ${String(index + 1)}`}
+                        className="h-14 w-14 object-cover"
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          {images.length > 1 && (
+            <button
+              type="button"
+              className="absolute right-4 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/20"
+              onClick={(event) => {
+                event.stopPropagation();
+                showNext();
+              }}
+              aria-label="Next image"
+              title="Next image"
+            >
+              <ChevronRight size={20} />
+            </button>
+          )}
         </div>
       )}
     </>
