@@ -12,6 +12,13 @@ export const TraceMarkBodySchema = z
   })
   .strict();
 
+export const DirectoryCreateBodySchema = z
+  .object({
+    path: z.string().trim().min(1),
+    createParents: z.boolean().optional(),
+  })
+  .strict();
+
 export const AgentScopedQuerySchema = z
   .object({
     agentId: z.enum(["codex", "opencode"]).optional()

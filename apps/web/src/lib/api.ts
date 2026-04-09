@@ -193,6 +193,13 @@ const TraceStatusSchema = z
   })
   .passthrough();
 
+const DirectoryCreateResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    path: z.string(),
+  })
+  .strict();
+
 const HistoryEntrySummarySchema = z
   .object({
     id: z.string(),
@@ -1043,6 +1050,28 @@ export async function getHistoryEntry(
   return requestEnvelope(
     `/api/debug/history/${encodeURIComponent(entryId)}`,
     HistoryDetailSchema,
+  );
+}
+
+export async function createServerDirectory(input: {
+  path: string;
+  createParents?: boolean;
+  baseUrlOverride?: string;
+}): Promise<z.infer<typeof DirectoryCreateResponseSchema>> {
+  return requestEnvelope(
+    "/api/filesystem/directories",
+    DirectoryCreateResponseSchema,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: input.path,
+        ...(typeof input.createParents === "boolean"
+          ? { createParents: input.createParents }
+          : {}),
+      }),
+    },
+    input.baseUrlOverride,
   );
 }
 

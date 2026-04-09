@@ -30,6 +30,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   clearServerBaseUrl,
   createThread,
+  createServerDirectory,
   getActiveSavedServerTarget,
   getDefaultServerBaseUrl,
   getAccountRateLimits,
@@ -48,6 +49,7 @@ import {
   removeNamedServerTarget,
   getTraceStatus,
   interruptThread,
+  listAgents,
   listCollaborationModes,
   listModels,
   listDebugHistory,
@@ -233,6 +235,12 @@ interface ServerTargetOption {
   label: string;
   baseUrl: string;
   isPrimary: boolean;
+}
+
+interface NewThreadModalState {
+  serverId: string;
+  agentId: AgentId;
+  projectPath: string;
 }
 
 /* ── Helpers ────────────────────────────────────────────────── */
@@ -1217,6 +1225,19 @@ export function App(): React.JSX.Element {
     string | null
   >(initialActiveSavedServerTarget?.id ?? null);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isNewThreadModalOpen, setIsNewThreadModalOpen] = useState(false);
+  const [newThreadModalState, setNewThreadModalState] =
+    useState<NewThreadModalState>({
+      serverId: "automatic-server",
+      agentId: "codex",
+      projectPath: "",
+    });
+  const [newThreadModalAgents, setNewThreadModalAgents] = useState<
+    AgentDescriptor[]
+  >([]);
+  const [isLoadingNewThreadAgents, setIsLoadingNewThreadAgents] =
+    useState(false);
+  const [isCreatingDirectory, setIsCreatingDirectory] = useState(false);
 
   /* UI state */
   const [activeTab, setActiveTab] = useState<"chat" | "debug">(
@@ -1333,6 +1354,25 @@ export function App(): React.JSX.Element {
   const primaryServerTarget = useMemo(
     () => serverTargets.find((target) => target.isPrimary) ?? null,
     [serverTargets],
+  );
+  const selectedNewThreadServer = useMemo(
+    () =>
+      serverTargets.find((target) => target.id === newThreadModalState.serverId) ??
+      primaryServerTarget ??
+      serverTargets[0] ??
+      null,
+    [newThreadModalState.serverId, primaryServerTarget, serverTargets],
+  );
+  const selectedNewThreadAgent = useMemo(
+    () =>
+      newThreadModalAgents.find(
+        (agent) => agent.id === newThreadModalState.agentId,
+      ) ?? null,
+    [newThreadModalAgents, newThreadModalState.agentId],
+  );
+  const newThreadProjectDirectorySuggestions = useMemo(
+    () => selectedNewThreadAgent?.projectDirectories ?? [],
+    [selectedNewThreadAgent],
   );
   const selectedThreadServerBaseUrl = selectedThread?.serverBaseUrl ?? null;
   const activeServerBaseUrl = selectedThreadServerBaseUrl ?? serverBaseUrl;
@@ -2602,6 +2642,74 @@ export function App(): React.JSX.Element {
     [editingServerTargetId, primaryServerTargetId, refreshAll],
   );
 
+  const openNewThreadModal = useCallback(
+    (options?: { agentId?: AgentId; projectPath?: string; serverId?: string }) => {
+      const fallbackServer =
+        options?.serverId ??
+        primaryServerTarget?.id ??
+        serverTargets[0]?.id ??
+        "automatic-server";
+      const fallbackAgent = options?.agentId ?? selectedAgentId;
+      setNewThreadModalState({
+        serverId: fallbackServer,
+        agentId: fallbackAgent,
+        projectPath: options?.projectPath ?? "",
+      });
+      setIsNewThreadModalOpen(true);
+    },
+    [primaryServerTarget?.id, selectedAgentId, serverTargets],
+  );
+
+  useEffect(() => {
+    if (!isNewThreadModalOpen || !selectedNewThreadServer) {
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingNewThreadAgents(true);
+
+    void listAgentsForBaseUrl(selectedNewThreadServer.baseUrl)
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setNewThreadModalAgents(result.agents);
+        const nextAgentId = result.agents.some(
+          (agent) => agent.id === newThreadModalState.agentId && agent.enabled,
+        )
+          ? newThreadModalState.agentId
+          : result.defaultAgentId;
+        setNewThreadModalState((previous) => ({
+          ...previous,
+          agentId: nextAgentId,
+          projectPath:
+            previous.projectPath ||
+            result.agents.find((agent) => agent.id === nextAgentId)
+              ?.projectDirectories[0] ||
+            "",
+        }));
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setError(toErrorMessage(error));
+          setNewThreadModalAgents([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingNewThreadAgents(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isNewThreadModalOpen,
+    newThreadModalState.agentId,
+    selectedNewThreadServer,
+  ]);
+
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
@@ -3634,7 +3742,11 @@ export function App(): React.JSX.Element {
   );
 
   const createNewThread = useCallback(
-    async (projectPath: string, agentId?: AgentId) => {
+    async (
+      projectPath: string,
+      agentId?: AgentId,
+      targetServerOverride?: ServerTargetOption | null,
+    ) => {
       const trimmedProjectPath = projectPath.trim();
       const targetAgentId = agentId ?? selectedAgentId;
       if (!trimmedProjectPath) {
@@ -3650,7 +3762,7 @@ export function App(): React.JSX.Element {
       setIsBusy(true);
       try {
         setError("");
-        const targetServer = primaryServerTarget ?? {
+        const targetServer = targetServerOverride ?? primaryServerTarget ?? {
           id: "automatic-server",
           label: "Automatic server",
           baseUrl: serverBaseUrl,
@@ -3698,17 +3810,54 @@ export function App(): React.JSX.Element {
     ],
   );
 
-  const createThreadForSingleAgent = useCallback(
-    (projectPath: string) => {
-      const onlyAgentId = availableAgentIds[0];
-      if (!onlyAgentId) {
-        setError("Cannot create thread: no enabled agent");
-        return;
-      }
-      void createNewThread(projectPath, onlyAgentId);
-    },
-    [availableAgentIds, createNewThread],
-  );
+  const submitNewThreadModal = useCallback(async () => {
+    const projectPath = newThreadModalState.projectPath.trim();
+    if (!selectedNewThreadServer) {
+      setError("Cannot create thread: missing target server");
+      return;
+    }
+    if (!projectPath) {
+      setError("Cannot create thread: missing project path");
+      return;
+    }
+
+    setIsNewThreadModalOpen(false);
+    await createNewThread(
+      projectPath,
+      newThreadModalState.agentId,
+      selectedNewThreadServer,
+    );
+  }, [createNewThread, newThreadModalState, selectedNewThreadServer]);
+
+  const createDirectoryForNewThread = useCallback(async () => {
+    const projectPath = newThreadModalState.projectPath.trim();
+    if (!selectedNewThreadServer) {
+      setError("Cannot create directory: missing target server");
+      return;
+    }
+    if (!projectPath) {
+      setError("Cannot create directory: missing path");
+      return;
+    }
+
+    setIsCreatingDirectory(true);
+    try {
+      setError("");
+      const result = await createServerDirectory({
+        path: projectPath,
+        createParents: true,
+        baseUrlOverride: selectedNewThreadServer.baseUrl,
+      });
+      setNewThreadModalState((previous) => ({
+        ...previous,
+        projectPath: result.path,
+      }));
+    } catch (error) {
+      setError(toErrorMessage(error));
+    } finally {
+      setIsCreatingDirectory(false);
+    }
+  }, [newThreadModalState.projectPath, selectedNewThreadServer]);
 
   const beginOpenSidebarSwipe = useCallback(
     (event: React.TouchEvent<HTMLDivElement>) => {
@@ -3878,9 +4027,9 @@ export function App(): React.JSX.Element {
                     className="rounded-full"
                     disabled={isBusy || !canCreateThreadForSelectedAgent}
                     onClick={() => {
-                      const defaultProjectPath =
-                        selectedAgentDescriptor?.projectDirectories[0] ?? ".";
-                      createThreadForSingleAgent(defaultProjectPath);
+                      openNewThreadModal({
+                        agentId: availableAgentIds[0] ?? selectedAgentId,
+                      });
                     }}
                   >
                     <Plus size={13} className="mr-1.5" />
@@ -3921,9 +4070,7 @@ export function App(): React.JSX.Element {
                             ) {
                               return;
                             }
-                            const defaultProjectPath =
-                              agentsById[agentId]?.projectDirectories[0] ?? ".";
-                            void createNewThread(defaultProjectPath, agentId);
+                            openNewThreadModal({ agentId });
                           }}
                         >
                           <span className="shrink-0 h-4 w-4 rounded-sm bg-muted/30 ring-1 ring-border/60 flex items-center justify-center overflow-hidden">
@@ -4090,7 +4237,10 @@ export function App(): React.JSX.Element {
                           if (!group.projectPath) {
                             return;
                           }
-                          createThreadForSingleAgent(group.projectPath);
+                          openNewThreadModal({
+                            agentId: availableAgentIds[0] ?? selectedAgentId,
+                            projectPath: group.projectPath,
+                          });
                         }}
                         title={
                           group.projectPath
@@ -4154,10 +4304,10 @@ export function App(): React.JSX.Element {
                                 ) {
                                   return;
                                 }
-                                void createNewThread(
-                                  group.projectPath,
+                                openNewThreadModal({
                                   agentId,
-                                );
+                                  projectPath: group.projectPath,
+                                });
                               }}
                             >
                               <span className="shrink-0 h-4 w-4 rounded-sm bg-muted/30 ring-1 ring-border/60 flex items-center justify-center overflow-hidden">
@@ -5090,6 +5240,154 @@ export function App(): React.JSX.Element {
         </div>
       </div>
       <AnimatePresence>
+        {isNewThreadModalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/55 backdrop-blur-[1px] p-4 md:p-8 flex items-center justify-center"
+            onClick={() => setIsNewThreadModalOpen(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.98, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.98, opacity: 0 }}
+              transition={{ duration: 0.16 }}
+              onClick={(event) => event.stopPropagation()}
+              className="w-full max-w-xl rounded-xl border border-border bg-background shadow-2xl overflow-hidden"
+            >
+              <div className="flex items-center justify-between border-b border-border px-4 py-3">
+                <div>
+                  <div className="text-sm font-semibold">New Thread</div>
+                  <div className="text-xs text-muted-foreground">
+                    Choose the server, agent, and working directory.
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => setIsNewThreadModalOpen(false)}
+                  title="Close new thread"
+                >
+                  <X size={14} />
+                </Button>
+              </div>
+
+              <div className="p-4 space-y-4">
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Server</Label>
+                  <Select
+                    value={newThreadModalState.serverId}
+                    onValueChange={(value) => {
+                      setNewThreadModalState((previous) => ({
+                        ...previous,
+                        serverId: value,
+                      }));
+                    }}
+                  >
+                    <SelectTrigger className="h-9 text-sm">
+                      <SelectValue placeholder="Choose server" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {serverTargets.map((target) => (
+                        <SelectItem key={target.id} value={target.id}>
+                          {target.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Agent</Label>
+                  <Select
+                    value={newThreadModalState.agentId}
+                    onValueChange={(value) => {
+                      setNewThreadModalState((previous) => ({
+                        ...previous,
+                        agentId: value as AgentId,
+                      }));
+                    }}
+                    disabled={isLoadingNewThreadAgents}
+                  >
+                    <SelectTrigger className="h-9 text-sm">
+                      <SelectValue placeholder="Choose agent" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {newThreadModalAgents
+                        .filter((agent) => agent.enabled)
+                        .map((agent) => (
+                          <SelectItem key={agent.id} value={agent.id}>
+                            {agent.label}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">
+                    Working Directory
+                  </Label>
+                  <Input
+                    list="new-thread-project-directories"
+                    value={newThreadModalState.projectPath}
+                    onChange={(event) => {
+                      setNewThreadModalState((previous) => ({
+                        ...previous,
+                        projectPath: event.target.value,
+                      }));
+                    }}
+                    placeholder="/srv/project or ./relative/path"
+                    className="h-9 text-sm"
+                  />
+                  <datalist id="new-thread-project-directories">
+                    {newThreadProjectDirectorySuggestions.map((directory) => (
+                      <option key={directory} value={directory} />
+                    ))}
+                  </datalist>
+                  <div className="text-xs text-muted-foreground">
+                    Existing directories appear as suggestions. You can also type
+                    a new path.
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-8 text-xs"
+                    disabled={
+                      isCreatingDirectory ||
+                      newThreadModalState.projectPath.trim().length === 0
+                    }
+                    onClick={() => {
+                      void createDirectoryForNewThread();
+                    }}
+                  >
+                    Create Directory
+                  </Button>
+                  <Button
+                    type="button"
+                    className="h-8 text-xs"
+                    disabled={
+                      isBusy ||
+                      isLoadingNewThreadAgents ||
+                      newThreadModalState.projectPath.trim().length === 0
+                    }
+                    onClick={() => {
+                      void submitNewThreadModal();
+                    }}
+                  >
+                    Create Thread
+                  </Button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
         {isSettingsModalOpen && (
           <motion.div
             initial={{ opacity: 0 }}

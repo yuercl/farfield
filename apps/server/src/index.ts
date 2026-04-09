@@ -12,6 +12,7 @@ import {
   type UnifiedProviderId,
 } from "@farfield/unified-surface";
 import {
+  DirectoryCreateBodySchema,
   parseBody,
   TraceMarkBodySchema,
   TraceStartBodySchema,
@@ -541,6 +542,27 @@ const server = http.createServer(async (req, res) => {
       jsonResponse(res, 200, {
         ok: true,
         features,
+      });
+      return;
+    }
+
+    if (req.method === "POST" && pathname === "/api/filesystem/directories") {
+      const body = parseBody(DirectoryCreateBodySchema, await readJsonBody(req));
+      const resolvedPath = path.isAbsolute(body.path)
+        ? path.normalize(body.path)
+        : path.resolve(DEFAULT_WORKSPACE, body.path);
+      fs.mkdirSync(resolvedPath, { recursive: body.createParents ?? true });
+      const stats = fs.statSync(resolvedPath);
+      if (!stats.isDirectory()) {
+        jsonResponse(res, 400, {
+          ok: false,
+          error: "Created path is not a directory",
+        });
+        return;
+      }
+      jsonResponse(res, 200, {
+        ok: true,
+        path: resolvedPath,
       });
       return;
     }
