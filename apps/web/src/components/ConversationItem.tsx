@@ -53,6 +53,14 @@ function readTextContent(content: UserMessageLikeItem["content"]): string {
     .join("\n");
 }
 
+function readImageContent(
+  content: UserMessageLikeItem["content"],
+): Array<{ url: string }> {
+  return content
+    .filter((part) => part.type === "image")
+    .map((part) => ({ url: part.url }));
+}
+
 interface RendererContext {
   isActive: boolean;
   toolSpacing: string;
@@ -68,14 +76,29 @@ type ItemRendererMap = {
 const ITEM_RENDERERS = {
   userMessage: ({ item }) => {
     const text = readTextContent(item.content);
-    if (!text) {
+    const images = readImageContent(item.content);
+    if (!text && images.length === 0) {
       return null;
     }
 
     return (
       <div className="flex justify-end">
         <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground leading-relaxed">
-          <p className="whitespace-pre-wrap break-words">{text}</p>
+          {images.length > 0 && (
+            <div className={text ? "mb-3 grid gap-2" : "grid gap-2"}>
+              {images.map((image, index) => (
+                <img
+                  key={`${image.url}-${String(index)}`}
+                  src={image.url}
+                  alt="User attachment"
+                  className="max-h-80 rounded-xl border border-border/60 object-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+              ))}
+            </div>
+          )}
+          {text && <p className="whitespace-pre-wrap break-words">{text}</p>}
         </div>
       </div>
     );
@@ -83,14 +106,29 @@ const ITEM_RENDERERS = {
 
   steeringUserMessage: ({ item }) => {
     const text = readTextContent(item.content);
-    if (!text) {
+    const images = readImageContent(item.content);
+    if (!text && images.length === 0) {
       return null;
     }
 
     return (
       <div className="flex justify-end">
         <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground leading-relaxed">
-          <p className="whitespace-pre-wrap break-words">{text}</p>
+          {images.length > 0 && (
+            <div className={text ? "mb-3 grid gap-2" : "grid gap-2"}>
+              {images.map((image, index) => (
+                <img
+                  key={`${image.url}-${String(index)}`}
+                  src={image.url}
+                  alt="User attachment"
+                  className="max-h-80 rounded-xl border border-border/60 object-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+              ))}
+            </div>
+          )}
+          {text && <p className="whitespace-pre-wrap break-words">{text}</p>}
         </div>
       </div>
     );

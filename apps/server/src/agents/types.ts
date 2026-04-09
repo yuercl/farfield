@@ -7,6 +7,7 @@ import type {
   CollaborationMode,
   AppServerGetAccountRateLimitsResponse,
   IpcFrame,
+  TurnStartParams,
   UserInputRequestId,
   UserInputResponsePayload,
 } from "@farfield/protocol";
@@ -73,7 +74,7 @@ export interface AgentReadThreadInput {
 
 export interface AgentSendMessageInput {
   threadId: string;
-  text: string;
+  parts: TurnStartParams["input"];
   ownerClientId?: string;
   cwd?: string;
   isSteering?: boolean;

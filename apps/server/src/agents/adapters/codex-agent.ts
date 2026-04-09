@@ -512,9 +512,8 @@ export class CodexAgentAdapter implements AgentAdapter {
 
   public async sendMessage(input: AgentSendMessageInput): Promise<void> {
     this.ensureCodexAvailable();
-    const text = input.text.trim();
-    if (text.length === 0) {
-      throw new Error("Message text is required");
+    if (input.parts.length === 0) {
+      throw new Error("Message input is required");
     }
 
     const ownerClientId = (() => {
@@ -537,7 +536,7 @@ export class CodexAgentAdapter implements AgentAdapter {
         await this.service.sendMessage({
           threadId: input.threadId,
           ownerClientId,
-          text,
+          parts: input.parts,
           ...(input.cwd ? { cwd: input.cwd } : {}),
           ...(typeof input.isSteering === "boolean"
             ? { isSteering: input.isSteering }
@@ -577,14 +576,14 @@ export class CodexAgentAdapter implements AgentAdapter {
         await this.appClient.steerTurn({
           threadId: input.threadId,
           expectedTurnId: activeTurnId,
-          input: [{ type: "text", text }],
+          input: input.parts,
         });
         return;
       }
 
       await this.appClient.startTurn({
         threadId: input.threadId,
-        input: [{ type: "text", text }],
+        input: input.parts,
         ...(input.cwd ? { cwd: input.cwd } : {}),
         attachments: [],
       });

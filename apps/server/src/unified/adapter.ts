@@ -276,7 +276,7 @@ function createHandlerTable(
     sendMessage: async (command) => {
       await adapter.sendMessage({
         threadId: command.threadId,
-        text: command.text,
+        parts: command.parts,
         ...(command.ownerClientId
           ? { ownerClientId: command.ownerClientId }
           : {}),

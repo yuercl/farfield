@@ -176,6 +176,17 @@ export class OpenCodeAgentAdapter implements AgentAdapter {
 
   public async sendMessage(input: AgentSendMessageInput): Promise<void> {
     this.ensureConnected();
+    const text = input.parts
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (input.parts.some((part) => part.type === "image")) {
+      throw new Error("OpenCode does not support image messages");
+    }
+    if (text.length === 0) {
+      throw new Error("Message text is required");
+    }
 
     const directory = input.cwd
       ? normalizeDirectoryInput(input.cwd)
@@ -187,7 +198,7 @@ export class OpenCodeAgentAdapter implements AgentAdapter {
 
     await this.service.sendMessage({
       sessionId: input.threadId,
-      text: input.text,
+      text,
       ...(selectedMode
         ? {
             agent: selectedMode.mode,

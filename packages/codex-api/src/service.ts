@@ -14,7 +14,7 @@ import type { DesktopIpcClient } from "./ipc-client.js";
 export interface SendMessageInput {
   threadId: string;
   ownerClientId: string;
-  text: string;
+  parts: TurnStartParams["input"];
   cwd?: string;
   isSteering?: boolean;
   turnStartTemplate?: TurnStartParams | null;
@@ -63,9 +63,8 @@ export class CodexMonitorService {
   }
 
   public async sendMessage(input: SendMessageInput): Promise<void> {
-    const text = input.text.trim();
-    if (!text) {
-      throw new Error("Message text is required");
+    if (input.parts.length === 0) {
+      throw new Error("Message input is required");
     }
 
     const template = input.turnStartTemplate;
@@ -74,13 +73,13 @@ export class CodexMonitorService {
       ? {
           ...template,
           threadId: input.threadId,
-          input: [{ type: "text" as const, text }],
+          input: input.parts,
           cwd: input.cwd ?? template.cwd,
           attachments: Array.isArray(template.attachments) ? template.attachments : []
         }
       : {
           threadId: input.threadId,
-          input: [{ type: "text" as const, text }],
+          input: input.parts,
           ...(input.cwd ? { cwd: input.cwd } : {}),
           attachments: []
         };

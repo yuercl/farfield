@@ -19,6 +19,7 @@ import {
   type UnifiedCommandResult,
   type UnifiedFeatureAvailability,
   type UnifiedFeatureId,
+  type UnifiedInputPart,
   type UnifiedProviderId,
   type UnifiedThread,
   type UnifiedThreadRequestResponse,
@@ -797,7 +798,7 @@ export async function sendMessage(input: {
   provider: AgentId;
   threadId: string;
   ownerClientId?: string;
-  text: string;
+  parts: UnifiedInputPart[];
   cwd?: string;
   isSteering?: boolean;
 }): Promise<void> {
@@ -805,7 +806,7 @@ export async function sendMessage(input: {
     kind: "sendMessage",
     provider: input.provider,
     threadId: input.threadId,
-    text: input.text,
+    parts: input.parts,
     ...(input.ownerClientId ? { ownerClientId: input.ownerClientId } : {}),
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(typeof input.isSteering === "boolean"

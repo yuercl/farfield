@@ -913,7 +913,7 @@ const UnifiedCommandSendMessageSchema = z
     kind: z.literal("sendMessage"),
     provider: UnifiedProviderIdSchema,
     threadId: NonEmptyStringSchema,
-    text: z.string().min(1),
+    parts: z.array(UnifiedInputPartSchema).min(1),
     ownerClientId: z.string().optional(),
     cwd: z.string().optional(),
     isSteering: z.boolean().optional()

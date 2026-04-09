@@ -74,6 +74,7 @@ import {
   type UnifiedThreadRequestResponse,
   type UnifiedFeatureAvailability,
   type UnifiedFeatureId,
+  type UnifiedInputPart,
 } from "@farfield/unified-surface";
 import { useTheme } from "@/hooks/useTheme";
 import { ChatTimeline, type ChatTimelineEntry } from "@/components/ChatTimeline";
@@ -3068,8 +3069,8 @@ export function App(): React.JSX.Element {
 
   /* Actions */
   const submitMessage = useCallback(
-    async (draft: string) => {
-      if (!draft.trim()) return;
+    async (parts: UnifiedInputPart[]) => {
+      if (parts.length === 0) return;
       if (!canSendMessageForActiveAgent) return;
       if (selectedThreadId && !hasResolvedSelectedThreadProvider) {
         setError("Thread provider is still loading");
@@ -3106,7 +3107,7 @@ export function App(): React.JSX.Element {
         await sendMessage({
           provider: threadAgentId,
           threadId,
-          text: draft,
+          parts,
           ...(liveState?.ownerClientId
             ? { ownerClientId: liveState.ownerClientId }
             : {}),
