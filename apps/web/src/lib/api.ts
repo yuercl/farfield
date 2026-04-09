@@ -31,10 +31,14 @@ import {
   buildServerUrl,
   clearStoredServerTarget,
   getDefaultServerBaseUrl as getDefaultStoredServerBaseUrl,
+  listStoredServerTargets,
   parseServerBaseUrl,
-  readStoredServerTarget,
+  readActiveStoredServerTarget,
+  removeStoredServerTarget,
   resolveServerBaseUrl,
-  saveServerBaseUrl,
+  saveServerTarget,
+  setActiveStoredServerTarget,
+  type StoredServerTarget,
 } from "./server-target";
 
 const ApiEnvelopeSchema = z
@@ -358,7 +362,7 @@ export function getServerBaseUrl(): string {
 }
 
 export function getSavedServerBaseUrl(): string | null {
-  const stored = readStoredServerTarget();
+  const stored = readActiveStoredServerTarget();
   return stored?.baseUrl ?? null;
 }
 
@@ -367,7 +371,17 @@ export function getDefaultServerBaseUrl(): string {
 }
 
 export function setServerBaseUrl(value: string): string {
-  return saveServerBaseUrl(value).baseUrl;
+  const next = saveServerTarget({
+    label: "Saved server",
+    baseUrl: value,
+  });
+  const activeTarget = next.targets.find(
+    (target) => target.id === next.activeTargetId,
+  );
+  if (!activeTarget) {
+    throw new Error("Saved server target was not activated");
+  }
+  return activeTarget.baseUrl;
 }
 
 export function clearServerBaseUrl(): void {
@@ -378,6 +392,37 @@ export function normalizeServerBaseUrl(value: string): string {
   return parseServerBaseUrl(value);
 }
 
+export function listSavedServerTargets(): StoredServerTarget[] {
+  return listStoredServerTargets();
+}
+
+export function getActiveSavedServerTarget(): StoredServerTarget | null {
+  return readActiveStoredServerTarget();
+}
+
+export function saveNamedServerTarget(input: {
+  id?: string;
+  label: string;
+  baseUrl: string;
+}): StoredServerTarget {
+  const next = saveServerTarget(input);
+  const activeTarget = next.targets.find(
+    (target) => target.id === next.activeTargetId,
+  );
+  if (!activeTarget) {
+    throw new Error("Saved server target was not activated");
+  }
+  return activeTarget;
+}
+
+export function removeNamedServerTarget(targetId: string): void {
+  removeStoredServerTarget(targetId);
+}
+
+export function setActiveServerTarget(targetId: string | null): void {
+  setActiveStoredServerTarget(targetId);
+}
+
 export function getUnifiedEventsUrl(baseUrlOverride?: string): string {
   return buildServerUrl("/api/unified/events", baseUrlOverride);
 }
@@ -385,8 +430,9 @@ export function getUnifiedEventsUrl(baseUrlOverride?: string): string {
 async function requestJson(
   path: string,
   init?: RequestInit,
+  baseUrlOverride?: string,
 ): Promise<{ response: Response; payload: JsonValue }> {
-  const response = await fetch(buildServerUrl(path), init);
+  const response = await fetch(buildServerUrl(path, baseUrlOverride), init);
   const payload = JsonValueSchema.parse(await response.json());
   return {
     response,
@@ -440,8 +486,9 @@ async function requestEnvelope<T>(
   path: string,
   schema: z.ZodType<T>,
   init?: RequestInit,
+  baseUrlOverride?: string,
 ): Promise<T> {
-  const { response, payload } = await requestJson(path, init);
+  const { response, payload } = await requestJson(path, init, baseUrlOverride);
 
   if (!response.ok) {
     throw buildApiRequestError(payload);
@@ -457,15 +504,20 @@ async function requestEnvelope<T>(
 
 async function runUnifiedCommand(
   command: UnifiedCommand,
+  baseUrlOverride?: string,
 ): Promise<UnifiedCommandResult> {
   const parsedCommand = UnifiedCommandSchema.parse(command);
-  const { response, payload } = await requestJson("/api/unified/command", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+  const { response, payload } = await requestJson(
+    "/api/unified/command",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(parsedCommand),
     },
-    body: JSON.stringify(parsedCommand),
-  });
+    baseUrlOverride,
+  );
 
   if (!response.ok) {
     throw buildApiRequestError(payload);
@@ -541,18 +593,31 @@ function buildCapabilities(
   };
 }
 
-export async function getHealth(): Promise<
-  z.infer<typeof HealthResponseSchema>
-> {
-  return requestEnvelope("/api/health", HealthResponseSchema);
+export async function getHealth(
+  baseUrlOverride?: string,
+): Promise<z.infer<typeof HealthResponseSchema>> {
+  return requestEnvelope(
+    "/api/health",
+    HealthResponseSchema,
+    undefined,
+    baseUrlOverride,
+  );
 }
 
 export async function listAgents(): Promise<
   z.infer<typeof AgentsResponseSchema>
 > {
+  return listAgentsForBaseUrl();
+}
+
+export async function listAgentsForBaseUrl(
+  baseUrlOverride?: string,
+): Promise<z.infer<typeof AgentsResponseSchema>> {
   const featuresEnvelope = await requestEnvelope(
     "/api/unified/features",
     UnifiedFeaturesEnvelopeSchema,
+    undefined,
+    baseUrlOverride,
   );
 
   const agentTasks = PROVIDER_IDS.map(async (providerId) => {
@@ -566,7 +631,7 @@ export async function listAgents(): Promise<
         const result = await runUnifiedCommand({
           kind: "listProjectDirectories",
           provider: providerId,
-        });
+        }, baseUrlOverride);
         if (result.kind === "listProjectDirectories") {
           projectDirectories = result.directories;
         }
@@ -634,6 +699,7 @@ export async function listSidebarThreads(options: {
   all: boolean;
   maxPages: number;
   cursor?: string | null;
+  baseUrlOverride?: string;
 }): Promise<z.infer<typeof SidebarThreadsResponseSchema>> {
   const params = new URLSearchParams();
   params.set("limit", String(options.limit));
@@ -647,6 +713,8 @@ export async function listSidebarThreads(options: {
   const payload = await requestEnvelope(
     `/api/unified/sidebar?${params.toString()}`,
     SidebarThreadsEnvelopeSchema,
+    undefined,
+    options.baseUrlOverride,
   );
 
   return SidebarThreadsResponseSchema.parse({
@@ -657,7 +725,11 @@ export async function listSidebarThreads(options: {
 
 export async function readThread(
   threadId: string,
-  options?: { includeTurns?: boolean; provider?: AgentId },
+  options?: {
+    includeTurns?: boolean;
+    provider?: AgentId;
+    baseUrlOverride?: string;
+  },
 ): Promise<z.infer<typeof ReadThreadResponseSchema>> {
   const params = new URLSearchParams();
   if (typeof options?.provider === "string") {
@@ -671,6 +743,8 @@ export async function readThread(
   const payload = await requestEnvelope(
     `/api/unified/thread/${encodeURIComponent(threadId)}${query.length > 0 ? `?${query}` : ""}`,
     UnifiedReadThreadEnvelopeSchema,
+    undefined,
+    options?.baseUrlOverride,
   );
 
   return ReadThreadResponseSchema.parse({
@@ -687,6 +761,7 @@ export async function createThread(input?: {
   sandbox?: string;
   approvalPolicy?: string;
   ephemeral?: boolean;
+  baseUrlOverride?: string;
 }): Promise<z.infer<typeof CreateThreadResponseSchema>> {
   const provider = input?.agentId ?? "codex";
   const result = await runUnifiedCommand({
@@ -701,7 +776,7 @@ export async function createThread(input?: {
     ...(typeof input?.ephemeral === "boolean"
       ? { ephemeral: input.ephemeral }
       : {}),
-  });
+  }, input?.baseUrlOverride);
 
   if (result.kind !== "createThread") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -715,11 +790,12 @@ export async function createThread(input?: {
 
 export async function listCollaborationModes(
   provider: AgentId,
+  baseUrlOverride?: string,
 ): Promise<z.infer<typeof CollaborationModesResponseSchema>> {
   const result = await runUnifiedCommand({
     kind: "listCollaborationModes",
     provider,
-  });
+  }, baseUrlOverride);
 
   if (result.kind !== "listCollaborationModes") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -732,12 +808,13 @@ export async function listCollaborationModes(
 
 export async function listModels(
   provider: AgentId,
+  baseUrlOverride?: string,
 ): Promise<z.infer<typeof ModelsResponseSchema>> {
   const result = await runUnifiedCommand({
     kind: "listModels",
     provider,
     limit: 200,
-  });
+  }, baseUrlOverride);
 
   if (result.kind !== "listModels") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -751,12 +828,13 @@ export async function listModels(
 export async function getLiveState(
   threadId: string,
   provider: AgentId,
+  baseUrlOverride?: string,
 ): Promise<z.infer<typeof LiveStateResponseSchema>> {
   const result = await runUnifiedCommand({
     kind: "readLiveState",
     provider,
     threadId,
-  });
+  }, baseUrlOverride);
 
   if (result.kind !== "readLiveState") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -774,13 +852,14 @@ export async function getLiveState(
 export async function getStreamEvents(
   threadId: string,
   provider: AgentId,
+  baseUrlOverride?: string,
 ): Promise<z.infer<typeof StreamEventsResponseSchema>> {
   const result = await runUnifiedCommand({
     kind: "readStreamEvents",
     provider,
     threadId,
     limit: 80,
-  });
+  }, baseUrlOverride);
 
   if (result.kind !== "readStreamEvents") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -801,6 +880,7 @@ export async function sendMessage(input: {
   parts: UnifiedInputPart[];
   cwd?: string;
   isSteering?: boolean;
+  baseUrlOverride?: string;
 }): Promise<void> {
   const result = await runUnifiedCommand({
     kind: "sendMessage",
@@ -812,7 +892,7 @@ export async function sendMessage(input: {
     ...(typeof input.isSteering === "boolean"
       ? { isSteering: input.isSteering }
       : {}),
-  });
+  }, input.baseUrlOverride);
 
   if (result.kind !== "sendMessage") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -828,9 +908,10 @@ export async function setCollaborationMode(input: {
     settings: {
       model?: string | null;
       reasoningEffort?: string | null;
-      developerInstructions?: string | null;
-    };
+        developerInstructions?: string | null;
+      };
   };
+  baseUrlOverride?: string;
 }): Promise<void> {
   const result = await runUnifiedCommand({
     kind: "setCollaborationMode",
@@ -856,7 +937,7 @@ export async function setCollaborationMode(input: {
           : {}),
       },
     },
-  });
+  }, input.baseUrlOverride);
 
   if (result.kind !== "setCollaborationMode") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -869,6 +950,7 @@ export async function submitUserInput(input: {
   ownerClientId?: string;
   requestId: z.infer<typeof UnifiedUserInputRequestIdSchema>;
   response: UnifiedThreadRequestResponse;
+  baseUrlOverride?: string;
 }): Promise<void> {
   UnifiedThreadRequestResponseSchema.parse(input.response);
 
@@ -879,7 +961,7 @@ export async function submitUserInput(input: {
     ...(input.ownerClientId ? { ownerClientId: input.ownerClientId } : {}),
     requestId: input.requestId,
     response: input.response,
-  });
+  }, input.baseUrlOverride);
 
   if (result.kind !== "submitUserInput") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -890,13 +972,14 @@ export async function interruptThread(input: {
   provider: AgentId;
   threadId: string;
   ownerClientId?: string;
+  baseUrlOverride?: string;
 }): Promise<void> {
   const result = await runUnifiedCommand({
     kind: "interrupt",
     provider: input.provider,
     threadId: input.threadId,
     ...(input.ownerClientId ? { ownerClientId: input.ownerClientId } : {}),
-  });
+  }, input.baseUrlOverride);
 
   if (result.kind !== "interrupt") {
     throw new Error(`Unexpected unified command result: ${result.kind}`);
@@ -970,12 +1053,16 @@ const AccountRateLimitsEnvelopeSchema = z
   .merge(AppServerGetAccountRateLimitsResponseSchema)
   .passthrough();
 
-export async function getAccountRateLimits(): Promise<
+export async function getAccountRateLimits(
+  baseUrlOverride?: string,
+): Promise<
   z.infer<typeof AppServerGetAccountRateLimitsResponseSchema>
 > {
   const payload = await requestEnvelope(
     "/api/account/rate-limits",
     AccountRateLimitsEnvelopeSchema,
+    undefined,
+    baseUrlOverride,
   );
 
   return AppServerGetAccountRateLimitsResponseSchema.parse({

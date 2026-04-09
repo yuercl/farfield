@@ -30,6 +30,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   clearServerBaseUrl,
   createThread,
+  getActiveSavedServerTarget,
   getDefaultServerBaseUrl,
   getAccountRateLimits,
   getHealth,
@@ -38,14 +39,15 @@ import {
   getPendingApprovalRequests,
   getPendingThreadRequests,
   getPendingUserInputRequests,
-  getSavedServerBaseUrl,
   getServerBaseUrl,
   getStreamEvents,
   getUnifiedEventsUrl,
+  listAgentsForBaseUrl,
+  listSavedServerTargets,
   readThread,
+  removeNamedServerTarget,
   getTraceStatus,
   interruptThread,
-  listAgents,
   listCollaborationModes,
   listModels,
   listDebugHistory,
@@ -56,7 +58,8 @@ import {
   startTrace,
   stopTrace,
   submitUserInput,
-  setServerBaseUrl,
+  saveNamedServerTarget,
+  setActiveServerTarget,
   type AgentId,
 } from "@/lib/api";
 import {
@@ -126,7 +129,12 @@ type PendingRequest = ReturnType<typeof getPendingUserInputRequests>[number];
 type PendingApprovalRequest = ReturnType<typeof getPendingApprovalRequests>[number];
 type PendingThreadRequest = ReturnType<typeof getPendingThreadRequests>[number];
 type PendingRequestId = PendingRequest["id"];
-type Thread = SidebarThreadsResponse["rows"][number];
+type SavedServerTarget = ReturnType<typeof listSavedServerTargets>[number];
+type Thread = SidebarThreadsResponse["rows"][number] & {
+  serverId: string;
+  serverLabel: string;
+  serverBaseUrl: string;
+};
 type ThreadListProviderErrors = SidebarThreadsResponse["errors"];
 type AgentDescriptor = AgentsResponse["agents"][number];
 type ConversationTurn = NonNullable<
@@ -190,16 +198,18 @@ interface CachedThreadViewState {
 interface AgentCacheEntry {
   value: AgentsResponse;
   fetchedAt: number;
+  baseUrl: string;
 }
 
 interface ProviderCatalogCacheEntry {
   modes: ModesResponse["data"];
   models: ModelsResponse["data"];
   fetchedAt: number;
+  baseUrl: string;
 }
 
 interface AppViewSnapshot {
-  threads: SidebarThreadsResponse["rows"];
+  threads: Thread[];
   threadListErrors: ThreadListProviderErrors;
   selectedThreadId: string | null;
   liveState: LiveStateResponse | null;
@@ -216,6 +226,13 @@ interface MobileSidebarSwipeGesture {
   mode: "open" | "close";
   startX: number;
   startY: number;
+}
+
+interface ServerTargetOption {
+  id: string;
+  label: string;
+  baseUrl: string;
+  isPrimary: boolean;
 }
 
 /* ── Helpers ────────────────────────────────────────────────── */
@@ -261,6 +278,35 @@ function threadLabel(thread: Thread): string {
   const text = thread.preview.trim();
   if (!text) return `thread ${thread.id.slice(0, 8)}`;
   return text;
+}
+
+function buildServerTargetOptions(
+  targets: SavedServerTarget[],
+  primaryTargetId: string | null,
+  defaultBaseUrl: string,
+): ServerTargetOption[] {
+  const explicitTargets =
+    targets.length > 0
+      ? targets
+      : [
+          {
+            id: "automatic-server",
+            label: "Automatic server",
+            baseUrl: defaultBaseUrl,
+          },
+        ];
+
+  return explicitTargets.map((target, index) => ({
+    id: target.id,
+    label: target.label,
+    baseUrl: target.baseUrl,
+    isPrimary:
+      primaryTargetId !== null
+        ? target.id === primaryTargetId
+        : targets.length === 0
+          ? index === 0
+          : index === 0,
+  }));
 }
 
 function threadRecencyTimestamp(thread: Thread): number {
@@ -349,6 +395,7 @@ function getLatestTokenUsageFromStreamEvents(
 
 function buildThreadSignature(thread: Thread): string {
   return [
+    thread.serverId,
     thread.id,
     String(thread.updatedAt ?? 0),
     String(thread.createdAt ?? 0),
@@ -358,6 +405,7 @@ function buildThreadSignature(thread: Thread): string {
     thread.waitingOnUserInput ? "1" : "0",
     thread.preview,
     thread.provider,
+    thread.serverBaseUrl,
     thread.cwd ?? "",
     thread.source ?? "",
   ].join("|");
@@ -371,6 +419,7 @@ function buildOptimisticThreadSummary(
   threadId: string,
   provider: AgentId,
   thread: CreatedThread,
+  server: ServerTargetOption,
 ): Thread {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const createdAt =
@@ -394,6 +443,9 @@ function buildOptimisticThreadSummary(
   return {
     id: threadId,
     provider,
+    serverId: server.id,
+    serverLabel: server.label,
+    serverBaseUrl: server.baseUrl,
     preview,
     createdAt,
     updatedAt,
@@ -1081,8 +1133,9 @@ export function App(): React.JSX.Element {
     [],
   );
   const initialServerBaseUrl = useMemo(() => getServerBaseUrl(), []);
-  const initialHasSavedServerBaseUrl = useMemo(
-    () => getSavedServerBaseUrl() !== null,
+  const initialSavedServerTargets = useMemo(() => listSavedServerTargets(), []);
+  const initialActiveSavedServerTarget = useMemo(
+    () => getActiveSavedServerTarget(),
     [],
   );
   const initialSnapshot = ENABLE_VIEW_SNAPSHOT_CACHE
@@ -1095,7 +1148,7 @@ export function App(): React.JSX.Element {
   /* State */
   const [error, setError] = useState("");
   const [health, setHealth] = useState<Health | null>(null);
-  const [threads, setThreads] = useState<SidebarThreadsResponse["rows"]>(
+  const [threads, setThreads] = useState<Thread[]>(
     initialSnapshot?.threads ?? [],
   );
   const [threadListErrors, setThreadListErrors] =
@@ -1147,13 +1200,22 @@ export function App(): React.JSX.Element {
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId>(
     initialSnapshot?.selectedAgentId ?? "codex",
   );
+  const [savedServerTargets, setSavedServerTargets] = useState<
+    SavedServerTarget[]
+  >(initialSavedServerTargets);
+  const [primaryServerTargetId, setPrimaryServerTargetId] = useState<
+    string | null
+  >(initialActiveSavedServerTarget?.id ?? null);
   const [serverBaseUrl, setServerBaseUrlState] =
     useState<string>(initialServerBaseUrl);
+  const [serverLabelDraft, setServerLabelDraft] = useState<string>(
+    initialActiveSavedServerTarget?.label ?? "",
+  );
   const [serverBaseUrlDraft, setServerBaseUrlDraft] =
     useState<string>(initialServerBaseUrl);
-  const [hasSavedServerTarget, setHasSavedServerTarget] = useState<boolean>(
-    initialHasSavedServerBaseUrl,
-  );
+  const [editingServerTargetId, setEditingServerTargetId] = useState<
+    string | null
+  >(initialActiveSavedServerTarget?.id ?? null);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
   /* UI state */
@@ -1232,7 +1294,7 @@ export function App(): React.JSX.Element {
   );
   const agentCacheRef = useRef<AgentCacheEntry | null>(null);
   const providerCatalogCacheRef = useRef<
-    Map<AgentId, ProviderCatalogCacheEntry>
+    Map<string, ProviderCatalogCacheEntry>
   >(new Map());
   const threadsSignatureRef = useRef<string[]>([]);
   const modesSignatureRef = useRef<string[]>([]);
@@ -1259,6 +1321,29 @@ export function App(): React.JSX.Element {
         .map((descriptor) => descriptor.id),
     [agentDescriptors],
   );
+  const serverTargets = useMemo(
+    () =>
+      buildServerTargetOptions(
+        savedServerTargets,
+        primaryServerTargetId,
+        getDefaultServerBaseUrl(),
+      ),
+    [primaryServerTargetId, savedServerTargets],
+  );
+  const primaryServerTarget = useMemo(
+    () => serverTargets.find((target) => target.isPrimary) ?? null,
+    [serverTargets],
+  );
+  const selectedThreadServerBaseUrl = selectedThread?.serverBaseUrl ?? null;
+  const activeServerBaseUrl = selectedThreadServerBaseUrl ?? serverBaseUrl;
+  const editingServerTarget = useMemo(
+    () =>
+      editingServerTargetId === null
+        ? null
+        : savedServerTargets.find((target) => target.id === editingServerTargetId) ??
+          null,
+    [editingServerTargetId, savedServerTargets],
+  );
   const showProviderIcons = availableAgentIds.length > 1;
   const selectedAgentDescriptor = useMemo(
     () => agentsById[selectedAgentId] ?? null,
@@ -1271,10 +1356,13 @@ export function App(): React.JSX.Element {
   const selectedAgentLabel = selectedAgentDescriptor?.label ?? "Agent";
   const reversedHistory = useMemo(() => history.slice().reverse(), [history]);
   const hasServerBaseUrlDraftChanges =
-    serverBaseUrlDraft.trim() !== serverBaseUrl;
+    editingServerTarget !== null
+      ? serverBaseUrlDraft.trim() !== editingServerTarget.baseUrl ||
+        serverLabelDraft.trim() !== editingServerTarget.label
+      : serverBaseUrlDraft.trim() !== "" || serverLabelDraft.trim() !== "";
   const unifiedEventsUrl = useMemo(
-    () => getUnifiedEventsUrl(serverBaseUrl),
-    [serverBaseUrl],
+    () => getUnifiedEventsUrl(activeServerBaseUrl),
+    [activeServerBaseUrl],
   );
   const upsertSidebarThread = useCallback((threadSummary: Thread) => {
     setThreads((previousThreads) => {
@@ -1320,8 +1408,12 @@ export function App(): React.JSX.Element {
           ? thread.cwd.trim()
           : null;
       const projectPath = cwd;
-      const key = projectPath ? `project:${projectPath}` : "project:unknown";
-      const label = projectPath ? basenameFromPath(projectPath) : "Unknown";
+      const key = projectPath
+        ? `server:${thread.serverId}:project:${projectPath}`
+        : `server:${thread.serverId}:project:unknown`;
+      const label = projectPath
+        ? `${basenameFromPath(projectPath)} · ${thread.serverLabel}`
+        : `Unknown · ${thread.serverLabel}`;
       const updatedAt = threadRecencyTimestamp(thread);
       const threadAgentId = thread.provider;
       const projectColor = projectColors[key] ?? null;
@@ -1355,17 +1447,19 @@ export function App(): React.JSX.Element {
           continue;
         }
         const key = `project:${normalized}`;
-        if (groups.has(key)) {
+        const primaryServerKey = primaryServerTarget?.id ?? "automatic-server";
+        const scopedKey = `server:${primaryServerKey}:project:${normalized}`;
+        if (groups.has(scopedKey)) {
           continue;
         }
-        groups.set(key, {
-          key,
+        groups.set(scopedKey, {
+          key: scopedKey,
           label: basenameFromPath(normalized),
           projectPath: normalized,
           latestUpdatedAt: 0,
           preferredAgentId: descriptor.id,
           threads: [],
-          userColor: projectColors[key] ?? null,
+          userColor: projectColors[scopedKey] ?? null,
         });
       }
     }
@@ -1388,7 +1482,7 @@ export function App(): React.JSX.Element {
     );
 
     return allGroups;
-  }, [agentDescriptors, projectColors, sidebarOrder, threads]);
+  }, [agentDescriptors, primaryServerTarget?.id, projectColors, sidebarOrder, threads]);
   const conversationState = useMemo(() => {
     const liveConversationState = liveState?.conversationState ?? null;
     const readConversationState = readThreadState?.thread ?? null;
@@ -1799,50 +1893,54 @@ export function App(): React.JSX.Element {
   const connectedEnabledAgentCount = agentDescriptors.filter(
     (descriptor) => descriptor.enabled && descriptor.connected,
   ).length;
-  const codexDesktopUnavailable =
-    codexConfigured && !codexConnected && connectedEnabledAgentCount > 0;
   const visibleHealthError =
     health?.state.lastError === "Desktop IPC is not connected" ||
     health?.state.lastError ===
       "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings."
       ? null
       : health?.state.lastError ?? null;
-  const allSystemsReady = codexConnected
-    ? health?.state.appReady === true &&
-      health?.state.ipcConnected === true &&
-      health?.state.ipcInitialized === true
-    : connectedEnabledAgentCount > 0 || openCodeConnected;
-  const hasAnySystemFailure = codexConnected
-    ? health?.state.appReady === false ||
-      health?.state.ipcConnected === false ||
-      health?.state.ipcInitialized === false
-    : connectedEnabledAgentCount === 0 && !openCodeConnected;
+  const allSystemsReady =
+    health?.state.appReady === true && connectedEnabledAgentCount > 0;
+  const hasAnySystemFailure =
+    health?.state.appReady === false ||
+    (connectedEnabledAgentCount === 0 && !openCodeConnected && !codexConfigured);
   /* Data loading */
   const loadCoreData = useCallback(async () => {
     const shouldLoadDebugData = activeTabRef.current === "debug";
     const now = Date.now();
+    const activeCatalogBaseUrl =
+      selectedThreadServerBaseUrl ?? primaryServerTarget?.baseUrl ?? serverBaseUrl;
     const cachedAgents = agentCacheRef.current;
     const shouldLoadAgents =
-      !cachedAgents || now - cachedAgents.fetchedAt >= AGENT_CACHE_TTL_MS;
+      !cachedAgents ||
+      cachedAgents.baseUrl !== activeCatalogBaseUrl ||
+      now - cachedAgents.fetchedAt >= AGENT_CACHE_TTL_MS;
     const agentsPromise: Promise<AgentsResponse> =
       shouldLoadAgents || !cachedAgents
-      ? listAgents().then((agents) => {
+      ? listAgentsForBaseUrl(activeCatalogBaseUrl).then((agents) => {
           agentCacheRef.current = {
             value: agents,
             fetchedAt: Date.now(),
+            baseUrl: activeCatalogBaseUrl,
           };
           return agents;
         })
       : Promise.resolve(cachedAgents.value);
 
-    const healthPromise = getHealth();
-    const rateLimitsPromise = getAccountRateLimits().catch(() => null);
-    const sidebarPromise = listSidebarThreads({
-      limit: 80,
-      archived: false,
-      all: false,
-      maxPages: 1,
-    });
+    const healthPromise = getHealth(activeCatalogBaseUrl);
+    const rateLimitsPromise = getAccountRateLimits(activeCatalogBaseUrl).catch(
+      () => null,
+    );
+    const sidebarPromises = serverTargets.map(async (target) => ({
+      target,
+      result: await listSidebarThreads({
+        limit: 80,
+        archived: false,
+        all: false,
+        maxPages: 1,
+        baseUrlOverride: target.baseUrl,
+      }),
+    }));
     const tracePromise = shouldLoadDebugData
       ? getTraceStatus()
       : Promise.resolve<TraceStatus | null>(null);
@@ -1850,8 +1948,25 @@ export function App(): React.JSX.Element {
       ? listDebugHistory(120)
       : Promise.resolve<HistoryResponse | null>(null);
 
-    const nt = await sidebarPromise;
-    const incomingThreads = sortThreadsByRecency(nt.rows);
+    const sidebarResults = await Promise.allSettled(sidebarPromises);
+    const successfulSidebarResults = sidebarResults.filter(
+      (
+        result,
+      ): result is PromiseFulfilledResult<{
+        target: ServerTargetOption;
+        result: SidebarThreadsResponse;
+      }> => result.status === "fulfilled",
+    );
+    const incomingThreads = sortThreadsByRecency(
+      successfulSidebarResults.flatMap(({ value }) =>
+        value.result.rows.map((thread) => ({
+          ...thread,
+          serverId: value.target.id,
+          serverLabel: value.target.label,
+          serverBaseUrl: value.target.baseUrl,
+        })),
+      ),
+    );
     const optimisticSelectedThreadIds = optimisticSelectedThreadIdsRef.current;
     if (optimisticSelectedThreadIds.size > 0) {
       for (const thread of incomingThreads) {
@@ -1863,8 +1978,16 @@ export function App(): React.JSX.Element {
       nextThreadProviders.set(thread.id, thread.provider);
     }
     threadProviderByIdRef.current = nextThreadProviders;
+    const primarySidebarResult =
+      successfulSidebarResults.find(
+        ({ value }) => value.target.baseUrl === activeCatalogBaseUrl,
+      ) ?? null;
+    const nextThreadErrors = primarySidebarResult?.value.result.errors ?? {
+      codex: null,
+      opencode: null,
+    };
     setThreadListErrors((prev) =>
-      hasSameThreadListErrors(prev, nt.errors) ? prev : nt.errors,
+      hasSameThreadListErrors(prev, nextThreadErrors) ? prev : nextThreadErrors,
     );
     setThreads((previousThreads) => {
       const nextThreads = mergeIncomingThreads(
@@ -1939,15 +2062,19 @@ export function App(): React.JSX.Element {
       ) ?? null;
     const activeProviderId =
       threadForActiveProvider?.provider ?? selectedAgentId;
+    const activeProviderBaseUrl =
+      threadForActiveProvider?.serverBaseUrl ?? activeCatalogBaseUrl;
+    const activeProviderCacheKey = `${activeProviderBaseUrl}|${activeProviderId}`;
     const activeDescriptor =
       nextAgents.find((agent) => agent.id === activeProviderId) ?? null;
 
     const canLoadModes = canUseFeature(activeDescriptor, "listCollaborationModes");
     const canLoadModels = canUseFeature(activeDescriptor, "listModels");
     const cachedCatalog =
-      providerCatalogCacheRef.current.get(activeProviderId) ?? null;
+      providerCatalogCacheRef.current.get(activeProviderCacheKey) ?? null;
     const shouldLoadCatalog =
       !cachedCatalog ||
+      cachedCatalog.baseUrl !== activeProviderBaseUrl ||
       now - cachedCatalog.fetchedAt >= PROVIDER_CATALOG_CACHE_TTL_MS;
 
     let nextModesData: ModesResponse["data"] = [];
@@ -1975,8 +2102,6 @@ export function App(): React.JSX.Element {
         if (
           prev &&
           prev.state.appReady === nh.state.appReady &&
-          prev.state.ipcConnected === nh.state.ipcConnected &&
-          prev.state.ipcInitialized === nh.state.ipcInitialized &&
           prev.state.gitCommit === nh.state.gitCommit &&
           prev.state.lastError === nh.state.lastError &&
           prev.state.historyCount === nh.state.historyCount &&
@@ -2121,18 +2246,19 @@ export function App(): React.JSX.Element {
     try {
       const [nextModesResult, nextModelsResult] = await Promise.all([
         canLoadModes
-          ? listCollaborationModes(activeProviderId)
+          ? listCollaborationModes(activeProviderId, activeProviderBaseUrl)
           : Promise.resolve({ data: [] as ModesResponse["data"] }),
         canLoadModels
-          ? listModels(activeProviderId)
+          ? listModels(activeProviderId, activeProviderBaseUrl)
           : Promise.resolve({ data: [] as ModelsResponse["data"] }),
       ]);
       nextModesData = nextModesResult.data;
       nextModelsData = nextModelsResult.data;
-      providerCatalogCacheRef.current.set(activeProviderId, {
+      providerCatalogCacheRef.current.set(activeProviderCacheKey, {
         modes: nextModesData,
         models: nextModelsData,
         fetchedAt: Date.now(),
+        baseUrl: activeProviderBaseUrl,
       });
     } catch (error) {
       console.error("Failed to load provider model catalog", error);
@@ -2166,7 +2292,14 @@ export function App(): React.JSX.Element {
         return nonPlanDefault?.mode ?? nextModesData[0]?.mode ?? "";
       });
     });
-  }, [agentDescriptors, selectedAgentId]);
+  }, [
+    agentDescriptors,
+    primaryServerTarget?.baseUrl,
+    selectedAgentId,
+    selectedThreadServerBaseUrl,
+    serverBaseUrl,
+    serverTargets,
+  ]);
 
   const loadSelectedThread = useCallback(
     async (
@@ -2175,15 +2308,21 @@ export function App(): React.JSX.Element {
     ) => {
       const includeTurns = options?.includeTurns ?? true;
       const includeStreamEvents = options?.includeStreamEvents ?? includeTurns;
+      const targetThread =
+        threads.find((thread) => thread.id === threadId) ?? null;
+      const baseUrlOverride =
+        targetThread?.serverBaseUrl ?? primaryServerTarget?.baseUrl ?? serverBaseUrl;
       let threadAgentId = threadProviderByIdRef.current.get(threadId) ?? null;
       let read =
         threadAgentId === null
           ? await readThread(threadId, {
               includeTurns,
+              baseUrlOverride,
             })
           : await readThread(threadId, {
               includeTurns,
               provider: threadAgentId,
+              baseUrlOverride,
             });
       threadAgentId = read.thread.provider;
       threadProviderByIdRef.current.set(threadId, threadAgentId);
@@ -2203,11 +2342,12 @@ export function App(): React.JSX.Element {
         read = await readThread(threadId, {
           includeTurns: true,
           provider: threadAgentId,
+          baseUrlOverride,
         });
       }
 
       const live = canReadLiveState
-        ? await getLiveState(threadId, threadAgentId)
+        ? await getLiveState(threadId, threadAgentId, baseUrlOverride)
         : {
             ok: true as const,
             threadId,
@@ -2220,6 +2360,7 @@ export function App(): React.JSX.Element {
         read = await readThread(threadId, {
           includeTurns: true,
           provider: threadAgentId,
+          baseUrlOverride,
         });
         shouldReadTurns = true;
       }
@@ -2314,7 +2455,11 @@ export function App(): React.JSX.Element {
         return;
       }
 
-      const stream = await getStreamEvents(threadId, threadAgentId);
+      const stream = await getStreamEvents(
+        threadId,
+        threadAgentId,
+        baseUrlOverride,
+      );
       nextStreamEvents = stream.events;
       threadViewStateCacheRef.current.set(threadId, {
         readThreadState: shouldReadTurns
@@ -2342,7 +2487,7 @@ export function App(): React.JSX.Element {
         });
       });
     },
-    [agentsById],
+    [agentsById, primaryServerTarget?.baseUrl, serverBaseUrl, threads],
   );
 
   const refreshAll = useCallback(async () => {
@@ -2362,26 +2507,36 @@ export function App(): React.JSX.Element {
   const saveServerTarget = useCallback(async () => {
     try {
       setError("");
-      const normalizedBaseUrl = setServerBaseUrl(serverBaseUrlDraft);
-      setServerBaseUrlState(normalizedBaseUrl);
-      setServerBaseUrlDraft(normalizedBaseUrl);
-      setHasSavedServerTarget(true);
+      const savedTarget = saveNamedServerTarget({
+        ...(editingServerTargetId ? { id: editingServerTargetId } : {}),
+        label: serverLabelDraft,
+        baseUrl: serverBaseUrlDraft,
+      });
+      setSavedServerTargets(listSavedServerTargets());
+      setPrimaryServerTargetId(savedTarget.id);
+      setActiveServerTarget(savedTarget.id);
+      setEditingServerTargetId(savedTarget.id);
+      setServerLabelDraft(savedTarget.label);
+      setServerBaseUrlState(savedTarget.baseUrl);
+      setServerBaseUrlDraft(savedTarget.baseUrl);
       agentCacheRef.current = null;
       providerCatalogCacheRef.current.clear();
       await refreshAll();
     } catch (e) {
       setError(toErrorMessage(e));
     }
-  }, [refreshAll, serverBaseUrlDraft]);
+  }, [editingServerTargetId, refreshAll, serverBaseUrlDraft, serverLabelDraft]);
 
   const useDefaultServerTarget = useCallback(async () => {
     try {
       setError("");
       clearServerBaseUrl();
       const defaultBaseUrl = getDefaultServerBaseUrl();
+      setPrimaryServerTargetId(null);
       setServerBaseUrlState(defaultBaseUrl);
+      setServerLabelDraft("");
       setServerBaseUrlDraft(defaultBaseUrl);
-      setHasSavedServerTarget(false);
+      setEditingServerTargetId(null);
       agentCacheRef.current = null;
       providerCatalogCacheRef.current.clear();
       await refreshAll();
@@ -2389,6 +2544,63 @@ export function App(): React.JSX.Element {
       setError(toErrorMessage(e));
     }
   }, [refreshAll]);
+
+  const editServerTarget = useCallback((target: SavedServerTarget) => {
+    setEditingServerTargetId(target.id);
+    setServerLabelDraft(target.label);
+    setServerBaseUrlDraft(target.baseUrl);
+  }, []);
+
+  const setPrimarySavedServerTarget = useCallback(
+    async (targetId: string) => {
+      try {
+        setError("");
+        setActiveServerTarget(targetId);
+        setPrimaryServerTargetId(targetId);
+        const activeTarget = listSavedServerTargets().find(
+          (target) => target.id === targetId,
+        );
+        if (activeTarget) {
+          setServerBaseUrlState(activeTarget.baseUrl);
+        }
+        agentCacheRef.current = null;
+        providerCatalogCacheRef.current.clear();
+        await refreshAll();
+      } catch (e) {
+        setError(toErrorMessage(e));
+      }
+    },
+    [refreshAll],
+  );
+
+  const deleteServerTarget = useCallback(
+    async (targetId: string) => {
+      try {
+        setError("");
+        removeNamedServerTarget(targetId);
+        const nextTargets = listSavedServerTargets();
+        setSavedServerTargets(nextTargets);
+        if (primaryServerTargetId === targetId) {
+          const nextPrimary = nextTargets[0] ?? null;
+          const nextPrimaryId = nextPrimary?.id ?? null;
+          setPrimaryServerTargetId(nextPrimaryId);
+          setActiveServerTarget(nextPrimaryId);
+          setServerBaseUrlState(nextPrimary?.baseUrl ?? getDefaultServerBaseUrl());
+        }
+        if (editingServerTargetId === targetId) {
+          setEditingServerTargetId(null);
+          setServerLabelDraft("");
+          setServerBaseUrlDraft("");
+        }
+        agentCacheRef.current = null;
+        providerCatalogCacheRef.current.clear();
+        await refreshAll();
+      } catch (e) {
+        setError(toErrorMessage(e));
+      }
+    },
+    [editingServerTargetId, primaryServerTargetId, refreshAll],
+  );
 
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
@@ -3086,8 +3298,15 @@ export function App(): React.JSX.Element {
 
         // Auto-create a thread if none is selected.
         if (!threadId) {
+          const targetServer = primaryServerTarget ?? {
+            id: "automatic-server",
+            label: "Automatic server",
+            baseUrl: serverBaseUrl,
+            isPrimary: true,
+          };
           const created = await createThread({
             agentId: selectedAgentId,
+            baseUrlOverride: targetServer.baseUrl,
           });
           threadId = created.threadId;
           threadAgentId = selectedAgentId;
@@ -3098,6 +3317,7 @@ export function App(): React.JSX.Element {
               threadId,
               threadAgentId,
               created.thread,
+              targetServer,
             ),
           );
           setSelectedThreadId(threadId);
@@ -3108,6 +3328,8 @@ export function App(): React.JSX.Element {
           provider: threadAgentId,
           threadId,
           parts,
+          baseUrlOverride:
+            selectedThread?.serverBaseUrl ?? primaryServerTarget?.baseUrl ?? serverBaseUrl,
           ...(liveState?.ownerClientId
             ? { ownerClientId: liveState.ownerClientId }
             : {}),
@@ -3126,7 +3348,10 @@ export function App(): React.JSX.Element {
       liveState?.ownerClientId,
       refreshAll,
       selectedAgentId,
+      selectedThread?.serverBaseUrl,
       selectedThreadId,
+      serverBaseUrl,
+      primaryServerTarget,
       upsertSidebarThread,
     ],
   );
@@ -3167,6 +3392,8 @@ export function App(): React.JSX.Element {
         await setCollaborationMode({
           provider: activeThreadAgentId,
           threadId: selectedThreadId,
+          baseUrlOverride:
+            selectedThread?.serverBaseUrl ?? primaryServerTarget?.baseUrl ?? serverBaseUrl,
           ...(liveState?.ownerClientId
             ? { ownerClientId: liveState.ownerClientId }
             : {}),
@@ -3197,7 +3424,10 @@ export function App(): React.JSX.Element {
       liveState?.ownerClientId,
       loadSelectedThread,
       modes,
+      selectedThread?.serverBaseUrl,
       selectedThreadId,
+      serverBaseUrl,
+      primaryServerTarget,
     ],
   );
 
@@ -3219,6 +3449,8 @@ export function App(): React.JSX.Element {
       await submitUserInput({
         provider: activeThreadAgentId,
         threadId: selectedThreadId,
+        baseUrlOverride:
+          selectedThread?.serverBaseUrl ?? primaryServerTarget?.baseUrl ?? serverBaseUrl,
         requestId: activeRequest.id,
         ...(liveState?.ownerClientId
           ? { ownerClientId: liveState.ownerClientId }
@@ -3237,8 +3469,11 @@ export function App(): React.JSX.Element {
     answerDraft,
     hasResolvedSelectedThreadProvider,
     liveState?.ownerClientId,
+    selectedThread?.serverBaseUrl,
     refreshAll,
     selectedThreadId,
+    serverBaseUrl,
+    primaryServerTarget,
   ]);
 
   const skipPendingRequest = useCallback(async () => {
@@ -3253,6 +3488,8 @@ export function App(): React.JSX.Element {
       await submitUserInput({
         provider: activeThreadAgentId,
         threadId: selectedThreadId,
+        baseUrlOverride:
+          selectedThread?.serverBaseUrl ?? primaryServerTarget?.baseUrl ?? serverBaseUrl,
         requestId: activeRequest.id,
         ...(liveState?.ownerClientId
           ? { ownerClientId: liveState.ownerClientId }
@@ -3270,8 +3507,11 @@ export function App(): React.JSX.Element {
     activeThreadAgentId,
     hasResolvedSelectedThreadProvider,
     liveState?.ownerClientId,
+    selectedThread?.serverBaseUrl,
     refreshAll,
     selectedThreadId,
+    serverBaseUrl,
+    primaryServerTarget,
   ]);
 
   const resolvePendingApprovalRequest = useCallback(
@@ -3288,6 +3528,8 @@ export function App(): React.JSX.Element {
         await submitUserInput({
           provider: activeThreadAgentId,
           threadId: selectedThreadId,
+          baseUrlOverride:
+            selectedThread?.serverBaseUrl ?? primaryServerTarget?.baseUrl ?? serverBaseUrl,
           requestId: activeApprovalRequest.id,
           ...(liveState?.ownerClientId
             ? { ownerClientId: liveState.ownerClientId }
@@ -3306,8 +3548,11 @@ export function App(): React.JSX.Element {
       activeThreadAgentId,
       hasResolvedSelectedThreadProvider,
       liveState?.ownerClientId,
+      selectedThread?.serverBaseUrl,
       refreshAll,
       selectedThreadId,
+      serverBaseUrl,
+      primaryServerTarget,
     ],
   );
 
@@ -3323,6 +3568,8 @@ export function App(): React.JSX.Element {
       await interruptThread({
         provider: activeThreadAgentId,
         threadId: selectedThreadId,
+        baseUrlOverride:
+          selectedThread?.serverBaseUrl ?? primaryServerTarget?.baseUrl ?? serverBaseUrl,
         ...(liveState?.ownerClientId
           ? { ownerClientId: liveState.ownerClientId }
           : {}),
@@ -3338,8 +3585,11 @@ export function App(): React.JSX.Element {
     canInterruptForActiveAgent,
     hasResolvedSelectedThreadProvider,
     liveState?.ownerClientId,
+    selectedThread?.serverBaseUrl,
     refreshAll,
     selectedThreadId,
+    serverBaseUrl,
+    primaryServerTarget,
   ]);
 
   const loadHistoryDetail = useCallback(async (id: string) => {
@@ -3400,9 +3650,16 @@ export function App(): React.JSX.Element {
       setIsBusy(true);
       try {
         setError("");
+        const targetServer = primaryServerTarget ?? {
+          id: "automatic-server",
+          label: "Automatic server",
+          baseUrl: serverBaseUrl,
+          isPrimary: true,
+        };
         const created = await createThread({
           cwd: trimmedProjectPath,
           agentId: targetAgentId,
+          baseUrlOverride: targetServer.baseUrl,
           ...(targetAgentId === "codex"
             ? {
                 approvalPolicy: DEFAULT_CODEX_APPROVAL_POLICY,
@@ -3417,6 +3674,7 @@ export function App(): React.JSX.Element {
             created.threadId,
             targetAgentId,
             created.thread,
+            targetServer,
           ),
         );
         setSelectedThreadId(created.threadId);
@@ -3429,7 +3687,15 @@ export function App(): React.JSX.Element {
         setIsBusy(false);
       }
     },
-    [agentsById, closeMobileSidebar, refreshAll, selectedAgentId, upsertSidebarThread],
+    [
+      agentsById,
+      closeMobileSidebar,
+      primaryServerTarget,
+      refreshAll,
+      selectedAgentId,
+      serverBaseUrl,
+      upsertSidebarThread,
+    ],
   );
 
   const createThreadForSingleAgent = useCallback(
@@ -3964,8 +4230,13 @@ export function App(): React.JSX.Element {
                                   />
                                 </span>
                               )}
-                              <span className="truncate">
-                                {threadLabel(thread)}
+                              <span className="min-w-0 flex-1 truncate">
+                                <span className="truncate">
+                                  {threadLabel(thread)}
+                                </span>
+                                <span className="block truncate text-[10px] text-muted-foreground/60">
+                                  {thread.serverLabel}
+                                </span>
                               </span>
                             </span>
                             <span className="shrink-0 flex items-center gap-1.5">
@@ -4037,21 +4308,7 @@ export function App(): React.JSX.Element {
                   </div>
                 ))}
               {codexConnected ? (
-                <>
-                  <div>App: {health?.state.appReady ? "ok" : "not ready"}</div>
-                  <div>
-                    IPC:{" "}
-                    {health?.state.ipcConnected ? "connected" : "disconnected"}
-                  </div>
-                  <div>
-                    Init: {health?.state.ipcInitialized ? "ready" : "not ready"}
-                  </div>
-                </>
-              ) : null}
-              {codexDesktopUnavailable ? (
-                <div className="max-w-64 break-words text-muted-foreground">
-                  Codex Desktop is unavailable on this host.
-                </div>
+                <div>App: {health?.state.appReady ? "ok" : "not ready"}</div>
               ) : null}
               {visibleHealthError && (
                 <div className="max-w-64 break-words text-destructive">
@@ -4870,10 +5127,86 @@ export function App(): React.JSX.Element {
 
               <div className="p-4 space-y-3">
                 <div className="space-y-1.5">
-                  <Label className="text-sm font-medium">Server</Label>
+                  <Label className="text-sm font-medium">Saved Servers</Label>
                   <div className="text-xs text-muted-foreground">
-                    Use your Tailscale HTTPS URL.
+                    Aggregate thread lists from multiple Farfield servers.
                   </div>
+                  <div className="space-y-2">
+                    {savedServerTargets.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+                        No saved servers yet.
+                      </div>
+                    ) : (
+                      savedServerTargets.map((target) => (
+                        <div
+                          key={target.id}
+                          className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium">
+                                {target.label}
+                              </span>
+                              {primaryServerTargetId === target.id && (
+                                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                                  Default
+                                </span>
+                              )}
+                            </div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              {target.baseUrl}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 gap-1">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={() => {
+                                void setPrimarySavedServerTarget(target.id);
+                              }}
+                            >
+                              Set default
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={() => {
+                                editServerTarget(target);
+                              }}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={() => {
+                                void deleteServerTarget(target.id);
+                              }}
+                            >
+                              Delete
+                            </Button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Label</Label>
+                  <Input
+                    value={serverLabelDraft}
+                    onChange={(e) => setServerLabelDraft(e.target.value)}
+                    placeholder="Workstation"
+                    className="h-9 text-sm"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-sm font-medium">Server URL</Label>
                   <Input
                     value={serverBaseUrlDraft}
                     onChange={(e) => setServerBaseUrlDraft(e.target.value)}
@@ -4897,11 +5230,24 @@ export function App(): React.JSX.Element {
                     variant="outline"
                     className="h-8 text-xs"
                     disabled={
+                      serverLabelDraft.trim().length === 0 ||
                       serverBaseUrlDraft.trim().length === 0 ||
                       !hasServerBaseUrlDraftChanges
                     }
                   >
-                    Save
+                    {editingServerTarget ? "Update" : "Save"}
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={() => {
+                      setEditingServerTargetId(null);
+                      setServerLabelDraft("");
+                      setServerBaseUrlDraft("");
+                    }}
+                    variant="outline"
+                    className="h-8 text-xs"
+                  >
+                    New
                   </Button>
                   <Button
                     type="button"
@@ -4916,13 +5262,7 @@ export function App(): React.JSX.Element {
                 </div>
 
                 <div className="text-xs text-muted-foreground break-all">
-                  Active: {serverBaseUrl}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  Mode:{" "}
-                  {hasSavedServerTarget
-                    ? "Saved server target"
-                    : "Automatic server target"}
+                  Default server: {primaryServerTarget?.baseUrl ?? serverBaseUrl}
                 </div>
               </div>
             </motion.div>
