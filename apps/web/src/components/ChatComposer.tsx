@@ -136,6 +136,20 @@ export function ChatComposer({
     return !window.matchMedia("(pointer: coarse)").matches;
   }, []);
 
+  const attachImageFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) {
+      return;
+    }
+    const nextAttachments = await Promise.all(
+      files.map(async (file, index) => ({
+        id: `${file.name}-${file.lastModified}-${String(index)}`,
+        name: file.name,
+        url: await readFileAsDataUrl(file),
+      })),
+    );
+    setAttachments((current) => [...current, ...nextAttachments]);
+  }, []);
+
   const handleAttachImages = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) {
       return;
@@ -146,15 +160,8 @@ export function ChatComposer({
     if (imageFiles.length === 0) {
       return;
     }
-    const nextAttachments = await Promise.all(
-      imageFiles.map(async (file, index) => ({
-        id: `${file.name}-${file.lastModified}-${String(index)}`,
-        name: file.name,
-        url: await readFileAsDataUrl(file),
-      })),
-    );
-    setAttachments((current) => [...current, ...nextAttachments]);
-  }, []);
+    await attachImageFiles(imageFiles);
+  }, [attachImageFiles]);
 
   const removeAttachment = useCallback((attachmentId: string) => {
     setAttachments((current) =>
@@ -238,6 +245,16 @@ export function ChatComposer({
               e.preventDefault();
               void sendDraft();
             }
+          }}
+          onPaste={(event) => {
+            const files = Array.from(event.clipboardData.files).filter((file) =>
+              file.type.startsWith("image/"),
+            );
+            if (files.length === 0) {
+              return;
+            }
+            event.preventDefault();
+            void attachImageFiles(files);
           }}
           placeholder={placeholder}
           rows={1}
