@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 
 const repoRoot = process.cwd();
 const targetRoot = path.join(repoRoot, "packages", "codex-protocol", "src", "generated", "app-server");
-const bunBinary = process.platform === "win32" ? "bun.exe" : "bun";
+const npmBinary = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function listFiles(directory) {
   if (!fs.existsSync(directory)) {
@@ -58,8 +58,8 @@ function snapshotDirectory(directory) {
 
 function runGenerator() {
   const result = spawnSync(
-    bunBinary,
-    ["run", "--filter", "@farfield/protocol", "generate:app-server-zod"],
+    npmBinary,
+    ["run", "generate:app-server-zod", "--workspace", "@farfield/protocol"],
     {
       cwd: repoRoot,
       stdio: "inherit",
