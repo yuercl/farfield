@@ -403,11 +403,28 @@ const ITEM_RENDERERS = {
     </div>
   ),
 
-  fileChange: ({ item, toolSpacing }) => (
-    <div className={toolSpacing}>
-      <DiffBlock changes={item.changes} />
-    </div>
-  ),
+  fileChange: ({ item, toolSpacing }) => {
+    const fc = item as typeof item & { aggregatedOutput?: string };
+    const isStreaming =
+      item.status === "inProgress" &&
+      (fc.aggregatedOutput !== undefined || item.changes.length === 0);
+    return (
+      <div className={toolSpacing}>
+        {isStreaming && fc.aggregatedOutput !== undefined ? (
+          <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
+            <div className="text-[10px] text-muted-foreground font-mono mb-1 uppercase tracking-wider">
+              File changes
+            </div>
+            <pre className="text-xs text-foreground/80 whitespace-pre-wrap break-all font-mono">
+              {fc.aggregatedOutput}
+            </pre>
+          </div>
+        ) : (
+          <DiffBlock changes={item.changes} />
+        )}
+      </div>
+    );
+  },
 
   contextCompaction: (_args) => (
     <div className="flex items-center my-6">

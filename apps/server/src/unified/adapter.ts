@@ -1034,11 +1034,17 @@ function mapTurnItem(
           : {}),
       };
 
-    case "fileChange":
+    case "fileChange": {
+      const fileChangeItem = item as typeof item & { aggregatedOutput?: string };
       return {
         id: item.id,
         type: "fileChange",
         status: item.status,
+        ...(fileChangeItem.aggregatedOutput !== undefined &&
+        fileChangeItem.aggregatedOutput !== null &&
+        fileChangeItem.aggregatedOutput.length > 0
+          ? { aggregatedOutput: fileChangeItem.aggregatedOutput }
+          : {}),
         changes: item.changes.map((change) => ({
           path: change.path,
           kind: {
@@ -1050,6 +1056,7 @@ function mapTurnItem(
           ...(change.diff !== undefined ? { diff: change.diff } : {}),
         })),
       };
+    }
 
     case "contextCompaction":
       return {

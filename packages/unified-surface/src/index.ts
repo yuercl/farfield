@@ -616,6 +616,7 @@ const UnifiedFileChangeItemSchema = z
     id: NonEmptyStringSchema,
     type: z.literal("fileChange"),
     status: NonEmptyStringSchema,
+    aggregatedOutput: z.string().optional(),
     changes: z.array(
       z
         .object({
@@ -1244,7 +1245,8 @@ const UnifiedThreadDeltaEventSchema = z.discriminatedUnion("type", [
         "plan",
         "commandExecution",
         "reasoningText",
-        "reasoningSummaryText"
+        "reasoningSummaryText",
+        "fileChange"
       ]),
       summaryIndex: NonNegativeIntSchema.optional(),
       delta: z.string()

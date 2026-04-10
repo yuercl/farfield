@@ -344,7 +344,7 @@ for (const agentId of configuredAgentIds) {
       if (!deltaEvent) {
         return;
       }
-      broadcastUnifiedEvent(deltaEvent);
+      broadcastTextDeltaCoalesced(deltaEvent);
     });
 
     adapters.push(codexAdapter);
@@ -596,6 +596,19 @@ function buildCodexThreadDeltaEvent(
         snapshot,
       };
     case "item/fileChange/outputDelta":
+      return {
+        kind: "threadDelta",
+        threadId: notification.params.threadId,
+        provider: "codex",
+        delta: {
+          type: "itemTextDelta",
+          turnId: notification.params.turnId,
+          itemId: notification.params.itemId,
+          itemType: "fileChange",
+          delta: notification.params.delta,
+        },
+        snapshot,
+      };
     case "item/mcpToolCall/progress":
       return null;
     case "item/reasoning/summaryPartAdded":
@@ -647,6 +660,51 @@ function broadcastUnifiedEvent(event: UnifiedEvent): void {
   for (const client of unifiedSseClients) {
     eventResponse(client, event);
   }
+}
+
+// Per-item text-delta accumulator: coalesces rapid-fire character deltas from a single
+// Codex response burst into one SSE event using setImmediate (fires after the current
+// I/O poll phase drains, so natural burst batching with zero artificial latency).
+interface PendingTextDelta {
+  event: Extract<UnifiedEvent, { kind: "threadDelta" }>;
+  handle: ReturnType<typeof setImmediate>;
+}
+const pendingTextDeltas = new Map<string, PendingTextDelta>();
+
+function broadcastTextDeltaCoalesced(event: UnifiedEvent): void {
+  if (
+    event.kind !== "threadDelta" ||
+    event.delta.type !== "itemTextDelta" ||
+    unifiedSseClients.size === 0
+  ) {
+    broadcastUnifiedEvent(event);
+    return;
+  }
+
+  const delta = event.delta;
+  const key = `${event.threadId}\0${delta.turnId}\0${delta.itemId}`;
+  const pending = pendingTextDeltas.get(key);
+
+  if (pending) {
+    // Merge: append delta string, keep latest snapshot
+    const pendingDelta = pending.event.delta;
+    if (pendingDelta.type === "itemTextDelta") {
+      pendingDelta.delta += delta.delta;
+    }
+    pending.event.snapshot = event.snapshot;
+    return;
+  }
+
+  // First delta for this key in the current burst — clone event so we can mutate it
+  const merged: Extract<UnifiedEvent, { kind: "threadDelta" }> = {
+    ...event,
+    delta: { ...delta },
+  };
+  const handle = setImmediate(() => {
+    pendingTextDeltas.delete(key);
+    broadcastUnifiedEvent(merged);
+  });
+  pendingTextDeltas.set(key, { event: merged, handle });
 }
 
 function writeSseKeepalive(): void {

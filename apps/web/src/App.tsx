@@ -994,11 +994,35 @@ function conversationContentSignature(
     return "no-turn-content";
   }
 
-  return JSON.stringify({
-    status: lastTurn.status,
-    items: lastTurn.items,
-    requests: state.requests,
-  });
+  // Cheap O(n) signature using text-length tracking instead of full JSON.stringify.
+  // Captures all meaningful changes (new items, status transitions, text growth,
+  // command output growth, reasoning growth) without serialising item content.
+  const items = lastTurn.items ?? [];
+  const itemSig = items
+    .map((item) => {
+      let contentLen = 0;
+      if (item.type === "agentMessage") {
+        contentLen = item.text?.length ?? 0;
+      } else if (item.type === "plan") {
+        contentLen = item.text?.length ?? 0;
+      } else if (item.type === "commandExecution") {
+        contentLen =
+          (item.aggregatedOutput?.length ?? 0) +
+          (item.exitCode != null ? 1 : 0);
+      } else if (item.type === "reasoning") {
+        contentLen =
+          (item.text?.length ?? 0) +
+          (item.summary?.reduce((s, p) => s + p.length, 0) ?? 0);
+      } else if (item.type === "fileChange") {
+        const fc = item as typeof item & { aggregatedOutput?: string };
+        contentLen =
+          (fc.aggregatedOutput?.length ?? 0) + item.changes.length;
+      }
+      return `${item.id}:${item.type}:${(item as { status?: string }).status ?? ""}:${contentLen}`;
+    })
+    .join(",");
+
+  return `${lastTurn.status}|${items.length}|${itemSig}|${state.requests?.length ?? 0}`;
 }
 
 function buildLiveStateSyncSignature(
@@ -1074,7 +1098,8 @@ function createDeltaPlaceholderItem(
     | "plan"
     | "commandExecution"
     | "reasoningText"
-    | "reasoningSummaryText",
+    | "reasoningSummaryText"
+    | "fileChange",
   summaryIndex?: number,
 ): ConversationTurnItem {
   switch (itemType) {
@@ -1112,6 +1137,14 @@ function createDeltaPlaceholderItem(
           summaryIndex === undefined
             ? [""]
             : Array.from({ length: summaryIndex + 1 }, () => ""),
+      };
+    case "fileChange":
+      return {
+        id: itemId,
+        type: "fileChange",
+        status: "inProgress",
+        aggregatedOutput: "",
+        changes: [],
       };
   }
 }
@@ -1254,6 +1287,14 @@ function applyUnifiedThreadDelta(
                       delta.summaryIndex ?? 0,
                       delta.delta,
                     ),
+                  };
+                case "fileChange":
+                  if (item.type !== "fileChange") {
+                    return item;
+                  }
+                  return {
+                    ...item,
+                    aggregatedOutput: `${(item as typeof item & { aggregatedOutput?: string }).aggregatedOutput ?? ""}${delta.delta}`,
                   };
               }
             },
@@ -3564,45 +3605,65 @@ export function App(): React.JSX.Element {
                   streamEvents: cachedState?.streamEvents ?? [],
                 });
 
-                startTransition(() => {
-                  setThreads((previousThreads) => {
-                    const nextThreads = previousThreads.map((threadSummary) => {
-                      if (threadSummary.id !== parsedEvent.threadId) {
-                        return threadSummary;
-                      }
+                // Pure text-content deltas never change sidebar-visible metadata
+                // (title, isGenerating, updatedAt). Skip setThreads to avoid
+                // scanning and re-sorting the full thread list on every character.
+                const isPureTextDelta =
+                  parsedEvent.delta.type === "itemTextDelta";
 
-                      return {
-                        ...threadSummary,
-                        updatedAt:
-                          nextThreadState.updatedAt ?? threadSummary.updatedAt,
-                        isGenerating: isThreadGeneratingState(nextThreadState),
-                        title: nextThreadState.title ?? null,
-                      };
+                // Pre-compute signatures outside the setState updaters so React
+                // only evaluates them once rather than on every updater invocation.
+                const nextLiveSig = buildLiveStateSyncSignature(nextLiveState);
+                const nextReadSig =
+                  buildReadThreadSyncSignature(nextReadThreadState);
+
+                startTransition(() => {
+                  if (!isPureTextDelta) {
+                    setThreads((previousThreads) => {
+                      const nextThreads = previousThreads.map(
+                        (threadSummary) => {
+                          if (threadSummary.id !== parsedEvent.threadId) {
+                            return threadSummary;
+                          }
+
+                          return {
+                            ...threadSummary,
+                            updatedAt:
+                              nextThreadState.updatedAt ??
+                              threadSummary.updatedAt,
+                            isGenerating:
+                              isThreadGeneratingState(nextThreadState),
+                            title: nextThreadState.title ?? null,
+                          };
+                        },
+                      );
+                      const sortedThreads = sortThreadsByRecency(nextThreads);
+                      const nextSignature =
+                        buildThreadsSignature(sortedThreads);
+                      if (
+                        signaturesMatch(
+                          threadsSignatureRef.current,
+                          nextSignature,
+                        )
+                      ) {
+                        return previousThreads;
+                      }
+                      threadsSignatureRef.current = nextSignature;
+                      return sortedThreads;
                     });
-                    const sortedThreads = sortThreadsByRecency(nextThreads);
-                    const nextSignature = buildThreadsSignature(sortedThreads);
-                    if (
-                      signaturesMatch(threadsSignatureRef.current, nextSignature)
-                    ) {
-                      return previousThreads;
-                    }
-                    threadsSignatureRef.current = nextSignature;
-                    return sortedThreads;
-                  });
+                  }
 
                   if (parsedEvent.threadId !== selectedThreadIdRef.current) {
                     return;
                   }
 
                   setLiveState((previousState) =>
-                    buildLiveStateSyncSignature(previousState) ===
-                    buildLiveStateSyncSignature(nextLiveState)
+                    buildLiveStateSyncSignature(previousState) === nextLiveSig
                       ? previousState
                       : nextLiveState,
                   );
                   setReadThreadState((previousState) =>
-                    buildReadThreadSyncSignature(previousState) ===
-                    buildReadThreadSyncSignature(nextReadThreadState)
+                    buildReadThreadSyncSignature(previousState) === nextReadSig
                       ? previousState
                       : nextReadThreadState,
                   );

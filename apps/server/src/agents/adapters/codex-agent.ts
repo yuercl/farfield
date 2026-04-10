@@ -42,6 +42,13 @@ type AgentMessageItem = Extract<ThreadItem, { type: "agentMessage" }>;
 type PlanItem = Extract<ThreadItem, { type: "plan" }>;
 type ReasoningItem = Extract<ThreadItem, { type: "reasoning" }>;
 type CommandExecutionItem = Extract<ThreadItem, { type: "commandExecution" }>;
+type FileChangeItem = Extract<ThreadItem, { type: "fileChange" }> & {
+  aggregatedOutput?: string;
+};
+
+const SERVER_OVERLOADED_ERROR_CODE = -32001;
+const MAX_BACKPRESSURE_RETRIES = 4;
+const BACKPRESSURE_BASE_DELAY_MS = 1_000;
 
 export interface CodexAgentRuntimeState {
   appReady: boolean;
@@ -791,6 +798,25 @@ export class CodexAgentAdapter implements AgentAdapter {
       }
 
       case "item/fileChange/outputDelta": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = updateTurnById(
+          current,
+          notification.params.turnId,
+          (turn) =>
+            updateFileChangeOutput(
+              turn,
+              notification.params.itemId,
+              notification.params.delta
+            ),
+          () => ({
+            id: notification.params.turnId,
+            turnId: notification.params.turnId,
+            status: "inProgress",
+            items: [createEmptyFileChangeItem(notification.params.itemId)]
+          })
+        );
+        this.storeSnapshot(notification.params.threadId, next);
+        this.emitRealtimeThreadDelta(notification.params.threadId, notification, next);
         return;
       }
 
@@ -961,19 +987,41 @@ export class CodexAgentAdapter implements AgentAdapter {
   }
 
   private async runAppServerCall<T>(operation: () => Promise<T>): Promise<T> {
-    try {
-      const result = await operation();
-      this.patchRuntimeState({
-        appReady: true,
-        lastError: null
-      });
-      return result;
-    } catch (error) {
-      this.patchRuntimeState({
-        appReady: !(error instanceof AppServerTransportError),
-        lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error))
-      });
-      throw error;
+    let attempt = 0;
+    while (true) {
+      try {
+        const result = await operation();
+        this.patchRuntimeState({
+          appReady: true,
+          lastError: null
+        });
+        return result;
+      } catch (error) {
+        const isOverloaded =
+          error instanceof AppServerRpcError &&
+          error.code === SERVER_OVERLOADED_ERROR_CODE;
+
+        if (isOverloaded && attempt < MAX_BACKPRESSURE_RETRIES) {
+          attempt += 1;
+          const jitter = Math.random() * 0.3 + 0.85; // 0.85–1.15
+          const delayMs = Math.min(
+            BACKPRESSURE_BASE_DELAY_MS * Math.pow(2, attempt - 1) * jitter,
+            30_000
+          );
+          logger.warn(
+            { attempt, delayMs: Math.round(delayMs) },
+            "app-server-overloaded-retry"
+          );
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+
+        this.patchRuntimeState({
+          appReady: !(error instanceof AppServerTransportError),
+          lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error))
+        });
+        throw error;
+      }
     }
   }
 
@@ -1519,6 +1567,9 @@ function mergeItems(existing: ThreadItem, incoming: ThreadItem): ThreadItem {
   ) {
     return mergeCommandExecutionItems(existing, incoming);
   }
+  if (incoming.type === "fileChange" && isFileChangeItem(existing)) {
+    return mergeFileChangeItems(existing, incoming);
+  }
 
   return incoming;
 }
@@ -1574,6 +1625,21 @@ function mergeCommandExecutionItems(
       incoming.aggregatedOutput.length > 0
         ? incoming.aggregatedOutput
         : existing.aggregatedOutput
+  };
+}
+
+function mergeFileChangeItems(
+  existing: FileChangeItem,
+  incoming: Extract<ThreadItem, { type: "fileChange" }>
+): FileChangeItem {
+  return {
+    ...existing,
+    ...incoming,
+    aggregatedOutput:
+      incoming.changes.length > 0
+        ? undefined
+        : existing.aggregatedOutput,
+    changes: incoming.changes.length > 0 ? incoming.changes : existing.changes
   };
 }
 
@@ -1797,6 +1863,47 @@ function ensureCommandExecutionItem(
     return createEmptyCommandExecutionItem(itemId);
   }
   return isCommandExecutionItem(item) ? item : null;
+}
+
+function createEmptyFileChangeItem(itemId: string): FileChangeItem {
+  return {
+    id: itemId,
+    type: "fileChange",
+    changes: [],
+    status: "inProgress",
+    aggregatedOutput: ""
+  };
+}
+
+function isFileChangeItem(item: ThreadItem): item is FileChangeItem {
+  return item.type === "fileChange";
+}
+
+function updateFileChangeOutput(
+  turn: ThreadTurn,
+  itemId: string,
+  delta: string
+): ThreadTurn {
+  const items = [...turn.items];
+  const itemIndex = items.findIndex((item) => item.id === itemId);
+  const existingItem = items[itemIndex];
+  const baseItem: FileChangeItem =
+    existingItem !== undefined && isFileChangeItem(existingItem)
+      ? existingItem
+      : createEmptyFileChangeItem(itemId);
+
+  const nextItem: FileChangeItem = {
+    ...baseItem,
+    aggregatedOutput: (baseItem.aggregatedOutput ?? "") + delta
+  };
+
+  if (itemIndex === -1) {
+    items.push(nextItem);
+  } else {
+    items[itemIndex] = nextItem;
+  }
+
+  return { ...turn, items };
 }
 
 function isAgentMessageItem(item: ThreadItem): item is AgentMessageItem {
