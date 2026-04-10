@@ -10,7 +10,7 @@ Strict schemas and types for Farfield's Codex protocol handling.
 
 ## What This Package Covers
 
-- IPC frame schemas:
+- Client event envelope schemas:
   - `initialize`
   - `request`
   - `response`
@@ -33,8 +33,8 @@ Strict schemas and types for Farfield's Codex protocol handling.
 
 Use parse helpers when reading any untrusted payload:
 
-- `parseIpcFrame`
-- `parseThreadStreamStateChangedBroadcast`
+- `parseClientEventEnvelope`
+- `parseThreadStreamEvent`
 - `parseThreadConversationState`
 - `parseUserInputResponsePayload`
 - `parseAppServerListThreadsResponse`

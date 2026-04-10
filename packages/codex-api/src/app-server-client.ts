@@ -1,4 +1,5 @@
 import {
+  parseAppServerSupportedServerNotification,
   type AppServerCollaborationModeListResponse,
   AppServerCollaborationModeListResponseSchema,
   type AppServerListModelsResponse,
@@ -9,6 +10,8 @@ import {
   AppServerGetAccountRateLimitsResponseSchema,
   type AppServerReadThreadResponse,
   AppServerReadThreadResponseSchema,
+  type AppServerSupportedServerNotification,
+  AppServerSupportedServerNotificationSchema,
   AppServerServerRequestSchema,
   type AppServerStartThreadResponse,
   AppServerStartThreadRequestSchema,
@@ -25,8 +28,11 @@ import { z } from "zod";
 import {
   AppServerTransport,
   ChildProcessAppServerTransport,
+  WebSocketAppServerTransport,
+  type AppServerServerNotificationMessage,
   type AppServerServerRequestMessage,
-  type ChildProcessAppServerTransportOptions
+  type ChildProcessAppServerTransportOptions,
+  type WebSocketAppServerTransportOptions
 } from "./app-server-transport.js";
 
 type AppServerServerRequest = z.infer<typeof AppServerServerRequestSchema>;
@@ -115,20 +121,54 @@ export class AppServerClient {
     string,
     Map<string, AppServerServerRequest>
   >();
+  private readonly serverRequestListeners = new Set<
+    (request: AppServerServerRequest) => void
+  >();
+  private readonly supportedServerNotificationListeners = new Set<
+    (notification: AppServerSupportedServerNotification) => void
+  >();
 
-  public constructor(transportOrOptions: AppServerTransport | ChildProcessAppServerTransportOptions) {
+  public constructor(
+    transportOrOptions:
+      | AppServerTransport
+      | ChildProcessAppServerTransportOptions
+      | WebSocketAppServerTransportOptions
+  ) {
     if ("request" in transportOrOptions && "close" in transportOrOptions) {
       this.transport = transportOrOptions;
+    } else if ("url" in transportOrOptions) {
+      this.transport = new WebSocketAppServerTransport(transportOrOptions);
     } else {
       this.transport = new ChildProcessAppServerTransport(transportOrOptions);
     }
     this.transport.setServerRequestHandler?.((request) => {
       this.handleServerRequest(request);
     });
+    this.transport.setServerNotificationHandler?.((notification) => {
+      this.handleServerNotification(notification);
+    });
   }
 
   public async close(): Promise<void> {
     await this.transport.close();
+  }
+
+  public onServerRequest(
+    listener: (request: AppServerServerRequest) => void
+  ): () => void {
+    this.serverRequestListeners.add(listener);
+    return () => {
+      this.serverRequestListeners.delete(listener);
+    };
+  }
+
+  public onSupportedServerNotification(
+    listener: (notification: AppServerSupportedServerNotification) => void
+  ): () => void {
+    this.supportedServerNotificationListeners.add(listener);
+    return () => {
+      this.supportedServerNotificationListeners.delete(listener);
+    };
   }
 
   public async listThreads(options: ListThreadsOptions): Promise<AppServerListThreadsResponse> {
@@ -343,6 +383,25 @@ export class AppServerClient {
       threadId,
       new Map([[requestKey, parsed]])
     );
+
+    for (const listener of this.serverRequestListeners) {
+      listener(parsed);
+    }
+  }
+
+  private handleServerNotification(
+    notification: AppServerServerNotificationMessage
+  ): void {
+    const parseResult =
+      AppServerSupportedServerNotificationSchema.safeParse(notification);
+    if (!parseResult.success) {
+      return;
+    }
+
+    const supported = parseAppServerSupportedServerNotification(parseResult.data);
+    for (const listener of this.supportedServerNotificationListeners) {
+      listener(supported);
+    }
   }
 
   private readThreadIdFromServerRequest(

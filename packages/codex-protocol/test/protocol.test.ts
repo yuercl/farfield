@@ -5,15 +5,15 @@ import {
   parseAppServerListModelsResponse,
   parseAppServerCollaborationModeListResponse,
   parseAppServerStartThreadResponse,
-  parseIpcFrame,
+  parseClientEventEnvelope,
   parseThreadConversationState,
-  parseThreadStreamStateChangedBroadcast,
+  parseThreadStreamEvent,
   parseUserInputResponsePayload
 } from "../src/index.js";
 
 describe("codex-protocol schemas", () => {
   it("parses a valid thread stream patches broadcast", () => {
-    const parsed = parseThreadStreamStateChangedBroadcast({
+    const parsed = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-123",
@@ -62,7 +62,7 @@ describe("codex-protocol schemas", () => {
   });
 
   it("parses snapshot broadcast with null title and empty model defaults", () => {
-    const parsed = parseThreadStreamStateChangedBroadcast({
+    const parsed = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-123",
@@ -107,7 +107,7 @@ describe("codex-protocol schemas", () => {
   });
 
   it("parses snapshot broadcast when requests include item/tool/call", () => {
-    const parsed = parseThreadStreamStateChangedBroadcast({
+    const parsed = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-123",
@@ -150,7 +150,7 @@ describe("codex-protocol schemas", () => {
   });
 
   it("parses snapshot broadcast when requests include item/plan/requestImplementation", () => {
-    const parsed = parseThreadStreamStateChangedBroadcast({
+    const parsed = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-123",
@@ -189,7 +189,7 @@ describe("codex-protocol schemas", () => {
   });
 
   it("parses snapshot broadcast when turn includes error item", () => {
-    const parsed = parseThreadStreamStateChangedBroadcast({
+    const parsed = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-123",
@@ -227,7 +227,7 @@ describe("codex-protocol schemas", () => {
   });
 
   it("parses snapshot broadcast when turn includes todo-list item", () => {
-    const parsed = parseThreadStreamStateChangedBroadcast({
+    const parsed = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-123",
@@ -270,7 +270,7 @@ describe("codex-protocol schemas", () => {
   });
 
   it("parses snapshot broadcast when turn includes remoteTaskCreated item", () => {
-    const parsed = parseThreadStreamStateChangedBroadcast({
+    const parsed = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-123",
@@ -310,7 +310,7 @@ describe("codex-protocol schemas", () => {
 
   it("rejects invalid patch value for remove operation", () => {
     expect(() =>
-      parseThreadStreamStateChangedBroadcast({
+      parseThreadStreamEvent({
         type: "broadcast",
         method: "thread-stream-state-changed",
         sourceClientId: "client-123",
@@ -336,7 +336,7 @@ describe("codex-protocol schemas", () => {
 
   it("rejects malformed snapshot request entries with schema details", () => {
     expect(() =>
-      parseThreadStreamStateChangedBroadcast({
+      parseThreadStreamEvent({
         type: "broadcast",
         method: "thread-stream-state-changed",
         sourceClientId: "client-123",
@@ -828,11 +828,11 @@ describe("codex-protocol schemas", () => {
     expect(parsed.turns[0]?.items[0]?.type).toBe("forkedFromConversation");
   });
 
-  it("parses generic ipc request frames", () => {
-    const parsed = parseIpcFrame({
+  it("parses generic client event request envelopes", () => {
+    const parsed = parseClientEventEnvelope({
       type: "request",
       requestId: "request-5",
-      method: "thread-follower-start-turn",
+      method: "thread/send-turn",
       params: {
         conversationId: "thread-123"
       },
@@ -844,7 +844,7 @@ describe("codex-protocol schemas", () => {
   });
 
   it("parses client discovery request frames", () => {
-    const parsed = parseIpcFrame({
+    const parsed = parseClientEventEnvelope({
       type: "client-discovery-request",
       requestId: "discovery-1",
       request: {

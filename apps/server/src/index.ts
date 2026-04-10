@@ -2,10 +2,9 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import path from "node:path";
 import fs from "node:fs";
-import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import type { IpcFrame } from "@farfield/protocol";
+import type { ClientEventEnvelope } from "@farfield/protocol";
 import {
   UnifiedCommandSchema,
   type UnifiedEvent,
@@ -36,13 +35,13 @@ import {
   UnifiedBackendFeatureError,
   buildUnifiedFeatureMatrix,
   createUnifiedProviderAdapters,
+  mapThread,
 } from "./unified/adapter.js";
 
 const HOST = process.env["HOST"] ?? "127.0.0.1";
 const PORT = Number(process.env["PORT"] ?? 4311);
 const HISTORY_LIMIT = 2_000;
 const USER_AGENT = "farfield/0.2.2";
-const IPC_RECONNECT_DELAY_MS = 1_000;
 const SIDEBAR_PREVIEW_MAX_CHARS = 180;
 
 const TRACE_DIR = path.resolve(process.cwd(), "traces");
@@ -51,7 +50,7 @@ const DEFAULT_WORKSPACE = path.resolve(process.cwd());
 interface HistoryEntry {
   id: string;
   at: string;
-  source: "ipc" | "app" | "system";
+  source: "stream" | "app" | "system";
   direction: "in" | "out" | "system";
   payload: unknown;
   meta: Record<string, unknown>;
@@ -90,19 +89,6 @@ function resolveCodexExecutablePath(): string {
   }
 
   return "codex";
-}
-
-function resolveIpcSocketPath(): string {
-  if (process.env["CODEX_IPC_SOCKET"]) {
-    return process.env["CODEX_IPC_SOCKET"];
-  }
-
-  if (process.platform === "win32") {
-    return "\\\\.\\pipe\\codex-ipc";
-  }
-
-  const uid = process.getuid?.() ?? 0;
-  return path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`);
 }
 
 function resolveCodexAppServerUrl(): string | null {
@@ -251,7 +237,6 @@ const configuredAgentIds = parsedCli.agentIds;
 const configuredUnifiedProviders: UnifiedProviderId[] = [...configuredAgentIds];
 const codexExecutable = resolveCodexExecutablePath();
 const codexAppServerUrl = resolveCodexAppServerUrl();
-const ipcSocketPath = resolveIpcSocketPath();
 const gitCommit = resolveGitCommitHash();
 
 const history: HistoryEntry[] = [];
@@ -314,25 +299,33 @@ function pushSystem(
 let codexAdapter: CodexAgentAdapter | null = null;
 let openCodeAdapter: OpenCodeAgentAdapter | null = null;
 const adapters: AgentAdapter[] = [];
+let unifiedAdapters: ReturnType<typeof createUnifiedProviderAdapters> | null =
+  null;
 
 for (const agentId of configuredAgentIds) {
   if (agentId === "codex") {
     codexAdapter = new CodexAgentAdapter({
       appExecutable: codexExecutable,
       ...(codexAppServerUrl ? { appServerUrl: codexAppServerUrl } : {}),
-      socketPath: ipcSocketPath,
       workspaceDir: DEFAULT_WORKSPACE,
       userAgent: USER_AGENT,
-      reconnectDelayMs: IPC_RECONNECT_DELAY_MS,
       onStateChange: () => {
         broadcastRuntimeState();
       },
     });
 
-    codexAdapter.onIpcFrame((event) => {
-      pushHistory("ipc", event.direction, event.frame, {
+    codexAdapter.onAppEvent((event) => {
+      pushHistory("app", event.direction, event.payload, {
         method: event.method,
         threadId: event.threadId,
+      });
+    });
+    codexAdapter.onRealtimeThreadUpdate((event) => {
+      broadcastUnifiedEvent({
+        kind: "threadUpdated",
+        threadId: event.threadId,
+        provider: "codex",
+        thread: mapThread("codex", event.thread),
       });
     });
 
@@ -347,7 +340,7 @@ for (const agentId of configuredAgentIds) {
 }
 
 const registry = new AgentRegistry(adapters);
-const unifiedAdapters = createUnifiedProviderAdapters({
+unifiedAdapters = createUnifiedProviderAdapters({
   codex: codexAdapter,
   opencode: openCodeAdapter,
 });
@@ -358,11 +351,10 @@ function getRuntimeStateSnapshot(): Record<string, unknown> {
   return {
     appExecutable: codexExecutable,
     ...(codexAppServerUrl ? { appServerUrl: codexAppServerUrl } : {}),
-    socketPath: ipcSocketPath,
     gitCommit,
     appReady: codexRuntimeState?.appReady ?? false,
-    ipcConnected: codexRuntimeState?.ipcConnected ?? false,
-    ipcInitialized: codexRuntimeState?.ipcInitialized ?? false,
+    transportConnected: codexRuntimeState?.transportConnected ?? false,
+    transportInitialized: codexRuntimeState?.transportInitialized ?? false,
     codexAvailable: codexRuntimeState?.codexAvailable ?? false,
     lastError: runtimeLastError ?? codexRuntimeState?.lastError ?? null,
     historyCount: history.length,
@@ -372,6 +364,9 @@ function getRuntimeStateSnapshot(): Record<string, unknown> {
 }
 
 function resolveUnifiedAdapter(provider: UnifiedProviderId) {
+  if (!unifiedAdapters) {
+    return null;
+  }
   return unifiedAdapters[provider];
 }
 
@@ -1195,7 +1190,6 @@ async function start(): Promise<void> {
 
   pushSystem("Starting Farfield monitor server", {
     appExecutable: codexExecutable,
-    socketPath: ipcSocketPath,
     agentIds: configuredAgentIds,
   });
 
@@ -1214,7 +1208,6 @@ async function start(): Promise<void> {
   pushSystem("Monitor server ready", {
     url: `http://${HOST}:${PORT}`,
     appExecutable: codexExecutable,
-    socketPath: ipcSocketPath,
     agentIds: configuredAgentIds,
   });
 

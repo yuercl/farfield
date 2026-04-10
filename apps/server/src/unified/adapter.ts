@@ -258,6 +258,7 @@ function createHandlerTable(
         kind: "createThread",
         threadId: created.threadId,
         thread: mapThread(provider, loaded.thread),
+        ...(created.model !== undefined ? { model: created.model } : {}),
       };
     },
 
@@ -617,7 +618,7 @@ function parseThreadWaitingState(
   };
 }
 
-function mapThread(
+export function mapThread(
   provider: UnifiedProviderId,
   thread: ThreadConversationState,
 ): UnifiedThread {

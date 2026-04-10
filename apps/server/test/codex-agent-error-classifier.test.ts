@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { AppServerRpcError, DesktopIpcError } from "@farfield/api";
+import { AppServerRpcError } from "@farfield/api";
 import {
   isAuthenticationRequiredToReadRateLimitsAppServerRpcError,
   isInvalidRequestAppServerRpcError,
-  isIpcNoClientFoundError,
   isThreadNotLoadedAppServerRpcError,
   isThreadNoRolloutIncludeTurnsAppServerRpcError,
   isThreadNotMaterializedIncludeTurnsAppServerRpcError,
@@ -180,32 +179,6 @@ describe("isAuthenticationRequiredToReadRateLimitsAppServerRpcError", () => {
   });
 });
 
-describe("isIpcNoClientFoundError", () => {
-  it("returns true for no-client-found desktop ipc errors", () => {
-    expect(
-      isIpcNoClientFoundError(
-        new DesktopIpcError(
-          "IPC thread-follower-start-turn failed: no-client-found",
-        ),
-      ),
-    ).toBe(true);
-  });
-
-  it("returns false for other errors", () => {
-    expect(
-      isIpcNoClientFoundError(
-        new DesktopIpcError("IPC thread-follower-start-turn failed: timeout"),
-      ),
-    ).toBe(false);
-    expect(
-      isIpcNoClientFoundError(
-        new AppServerRpcError(-32600, "thread not found"),
-      ),
-    ).toBe(false);
-    expect(isIpcNoClientFoundError(new Error("no-client-found"))).toBe(false);
-  });
-});
-
 describe("normalizeCodexRuntimeErrorMessage", () => {
   it("rewrites rate-limits authentication errors", () => {
     expect(
@@ -214,16 +187,6 @@ describe("normalizeCodexRuntimeErrorMessage", () => {
       ),
     ).toBe(
       "Rate limits unavailable until ChatGPT authentication is connected.",
-    );
-  });
-
-  it("rewrites missing IPC socket errors", () => {
-    expect(
-      normalizeCodexRuntimeErrorMessage(
-        "connect ENOENT /tmp/codex-ipc/ipc-1000.sock",
-      ),
-    ).toBe(
-      "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings.",
     );
   });
 

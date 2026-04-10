@@ -76,6 +76,7 @@ function createCodexAdapter(): AgentAdapter {
       return {
         threadId: SAMPLE_THREAD.id,
         thread: SAMPLE_THREAD_LIST_ITEM,
+        model: "gpt-5.3-codex",
       };
     },
     async readThread() {
@@ -230,7 +231,12 @@ function createCommand(
         kind,
         provider,
         threadId: SAMPLE_THREAD.id,
-        text: "hello",
+        parts: [
+          {
+            type: "text",
+            text: "hello",
+          },
+        ],
       });
     case "interrupt":
       return UnifiedCommandSchema.parse({
@@ -357,6 +363,9 @@ describe("unified provider adapters", () => {
         expect(codexResult.kind).toBe(kind);
         if (codexResult.kind === "listThreads") {
           expect(codexResult.data[0]?.title).toBe("Named Thread");
+        }
+        if (codexResult.kind === "createThread") {
+          expect(codexResult.model).toBe("gpt-5.3-codex");
         }
       } else {
         await expect(

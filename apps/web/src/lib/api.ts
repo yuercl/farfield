@@ -77,8 +77,8 @@ const HealthResponseSchema = z
     state: z
       .object({
         appReady: z.boolean(),
-        ipcConnected: z.boolean(),
-        ipcInitialized: z.boolean(),
+        transportConnected: z.boolean(),
+        transportInitialized: z.boolean(),
         gitCommit: z.string().nullable().optional(),
         lastError: z.string().nullable(),
         historyCount: z.number().int().nonnegative(),
@@ -164,6 +164,7 @@ const CreateThreadResponseSchema = z
   .object({
     threadId: z.string(),
     thread: UnifiedThreadSchema,
+    model: z.union([z.string(), z.null()]).optional(),
   })
   .strict();
 
@@ -221,7 +222,7 @@ const HistoryEntrySummarySchema = z
   .object({
     id: z.string(),
     at: z.string(),
-    source: z.enum(["ipc", "app", "system"]),
+    source: z.enum(["stream", "app", "system"]),
     direction: z.enum(["in", "out", "system"]),
     meta: z.record(JsonValueSchema),
   })
@@ -809,6 +810,7 @@ export async function createThread(input?: {
   return CreateThreadResponseSchema.parse({
     threadId: result.threadId,
     thread: result.thread,
+    ...(result.model !== undefined ? { model: result.model } : {}),
   });
 }
 

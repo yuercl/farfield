@@ -4,9 +4,9 @@ import type {
   AppServerListThreadsResponse,
   AppServerReadThreadResponse,
   AppServerStartThreadResponse,
+  ClientEventEnvelope,
   CollaborationMode,
   AppServerGetAccountRateLimitsResponse,
-  IpcFrame,
   TurnStartParams,
   UserInputRequestId,
   UserInputResponsePayload,
@@ -111,7 +111,7 @@ export interface AgentThreadLiveState {
 
 export interface AgentThreadStreamEvents {
   ownerClientId: string | null;
-  events: IpcFrame[];
+  events: ClientEventEnvelope[];
 }
 
 export interface AgentDescriptor {

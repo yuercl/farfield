@@ -17,10 +17,18 @@ export interface AppServerServerRequestMessage {
   params: unknown;
 }
 
+export interface AppServerServerNotificationMessage {
+  method: string;
+  params: unknown;
+}
+
 export interface AppServerTransport {
   request(method: AppServerClientRequestMethod, params: unknown, timeoutMs?: number): Promise<unknown>;
   respond(requestId: AppServerRequestId, result: unknown): Promise<void>;
   setServerRequestHandler?(handler: ((request: AppServerServerRequestMessage) => void) | null): void;
+  setServerNotificationHandler?(
+    handler: ((notification: AppServerServerNotificationMessage) => void) | null
+  ): void;
   close(): Promise<void>;
 }
 
@@ -53,6 +61,9 @@ export class ChildProcessAppServerTransport implements AppServerTransport {
   private readonly requestTimeoutMs: number;
   private readonly onStderr: ((line: string) => void) | undefined;
   private serverRequestHandler: ((request: AppServerServerRequestMessage) => void) | null = null;
+  private serverNotificationHandler:
+    | ((notification: AppServerServerNotificationMessage) => void)
+    | null = null;
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<number, PendingRequest>();
   private requestId = 0;
@@ -114,6 +125,10 @@ export class ChildProcessAppServerTransport implements AppServerTransport {
       const message = parseJsonRpcIncomingMessage(raw);
 
       if (message.kind === "notification") {
+        this.serverNotificationHandler?.({
+          method: message.value.method,
+          params: message.value.params
+        });
         return;
       }
 
@@ -274,6 +289,12 @@ export class ChildProcessAppServerTransport implements AppServerTransport {
     this.serverRequestHandler = handler;
   }
 
+  public setServerNotificationHandler(
+    handler: ((notification: AppServerServerNotificationMessage) => void) | null
+  ): void {
+    this.serverNotificationHandler = handler;
+  }
+
   public async respond(requestId: AppServerRequestId, result: unknown): Promise<void> {
     this.ensureStarted();
     await this.ensureInitialized();
@@ -321,6 +342,9 @@ export class WebSocketAppServerTransport implements AppServerTransport {
   private readonly userAgent: string;
   private readonly requestTimeoutMs: number;
   private serverRequestHandler: ((request: AppServerServerRequestMessage) => void) | null = null;
+  private serverNotificationHandler:
+    | ((notification: AppServerServerNotificationMessage) => void)
+    | null = null;
   private socket: WebSocket | null = null;
   private readonly pending = new Map<AppServerRequestId, PendingRequest>();
   private requestId = 0;
@@ -394,6 +418,10 @@ export class WebSocketAppServerTransport implements AppServerTransport {
     const message = parseJsonRpcIncomingMessage(raw);
 
     if (message.kind === "notification") {
+      this.serverNotificationHandler?.({
+        method: message.value.method,
+        params: message.value.params
+      });
       return;
     }
 
@@ -535,6 +563,12 @@ export class WebSocketAppServerTransport implements AppServerTransport {
     handler: ((request: AppServerServerRequestMessage) => void) | null
   ): void {
     this.serverRequestHandler = handler;
+  }
+
+  public setServerNotificationHandler(
+    handler: ((notification: AppServerServerNotificationMessage) => void) | null
+  ): void {
+    this.serverNotificationHandler = handler;
   }
 
   public async respond(requestId: AppServerRequestId, result: unknown): Promise<void> {

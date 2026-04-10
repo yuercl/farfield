@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { ProtocolValidationError } from "./errors.js";
-import { CollaborationModeSchema, ThreadConversationStateSchema } from "./thread.js";
+import {
+  CollaborationModeSchema,
+  ThreadConversationStateSchema,
+  ThreadTurnSchema,
+  TurnItemSchema
+} from "./thread.js";
 import {
   APP_SERVER_CLIENT_NOTIFICATION_METHODS,
   APP_SERVER_CLIENT_REQUEST_METHODS,
@@ -125,6 +130,390 @@ export const AppServerSetModeRequestSchema = z
   })
   .passthrough();
 
+const AppServerNotificationTurnPlanStepSchema = z
+  .object({
+    step: z.string(),
+    status: z.string().min(1)
+  })
+  .strict();
+
+const AppServerNotificationTokenUsageBreakdownSchema = z
+  .object({
+    cachedInputTokens: z.number().int(),
+    inputTokens: z.number().int(),
+    outputTokens: z.number().int(),
+    reasoningOutputTokens: z.number().int(),
+    totalTokens: z.number().int()
+  })
+  .strict();
+
+const AppServerNotificationThreadTokenUsageSchema = z
+  .object({
+    last: AppServerNotificationTokenUsageBreakdownSchema,
+    total: AppServerNotificationTokenUsageBreakdownSchema,
+    modelContextWindow: z.union([z.number().int(), z.null()]).optional()
+  })
+  .strict();
+
+const AppServerThreadStartedNotificationParamsSchema = z
+  .object({
+    thread: ThreadConversationStateSchema
+  })
+  .strict();
+
+const AppServerThreadNameUpdatedNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    threadName: z.union([z.string(), z.null()]).optional()
+  })
+  .strict();
+
+const AppServerThreadTokenUsageUpdatedNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    tokenUsage: AppServerNotificationThreadTokenUsageSchema
+  })
+  .strict();
+
+const AppServerTurnStartedNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turn: ThreadTurnSchema
+  })
+  .strict();
+
+const AppServerTurnCompletedNotificationParamsSchema =
+  AppServerTurnStartedNotificationParamsSchema;
+
+const AppServerTurnDiffUpdatedNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    diff: z.string()
+  })
+  .strict();
+
+const AppServerTurnPlanUpdatedNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    explanation: z.union([z.string(), z.null()]).optional(),
+    plan: z.array(AppServerNotificationTurnPlanStepSchema)
+  })
+  .strict();
+
+const AppServerItemStartedNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    item: TurnItemSchema
+  })
+  .strict();
+
+const AppServerItemCompletedNotificationParamsSchema =
+  AppServerItemStartedNotificationParamsSchema;
+
+const AppServerItemAgentMessageDeltaNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    itemId: z.string().min(1),
+    delta: z.string()
+  })
+  .strict();
+
+const AppServerItemCommandExecutionOutputDeltaNotificationParamsSchema =
+  AppServerItemAgentMessageDeltaNotificationParamsSchema;
+
+const AppServerItemFileChangeOutputDeltaNotificationParamsSchema =
+  AppServerItemAgentMessageDeltaNotificationParamsSchema;
+
+const AppServerItemPlanDeltaNotificationParamsSchema =
+  AppServerItemAgentMessageDeltaNotificationParamsSchema;
+
+const AppServerItemReasoningSummaryPartAddedNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    itemId: z.string().min(1),
+    summaryIndex: z.number().int()
+  })
+  .strict();
+
+const AppServerItemReasoningSummaryTextDeltaNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    itemId: z.string().min(1),
+    summaryIndex: z.number().int(),
+    delta: z.string()
+  })
+  .strict();
+
+const AppServerItemReasoningTextDeltaNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    itemId: z.string().min(1),
+    contentIndex: z.number().int(),
+    delta: z.string()
+  })
+  .strict();
+
+const AppServerItemMcpToolCallProgressNotificationParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    turnId: z.string().min(1),
+    itemId: z.string().min(1),
+    message: z.string()
+  })
+  .strict();
+
+export type AppServerSupportedServerNotification =
+  | {
+      method: "thread/started";
+      params: z.infer<typeof AppServerThreadStartedNotificationParamsSchema>;
+    }
+  | {
+      method: "thread/name/updated";
+      params: z.infer<typeof AppServerThreadNameUpdatedNotificationParamsSchema>;
+    }
+  | {
+      method: "thread/tokenUsage/updated";
+      params: z.infer<
+        typeof AppServerThreadTokenUsageUpdatedNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "turn/started";
+      params: z.infer<typeof AppServerTurnStartedNotificationParamsSchema>;
+    }
+  | {
+      method: "turn/completed";
+      params: z.infer<typeof AppServerTurnCompletedNotificationParamsSchema>;
+    }
+  | {
+      method: "turn/diff/updated";
+      params: z.infer<typeof AppServerTurnDiffUpdatedNotificationParamsSchema>;
+    }
+  | {
+      method: "turn/plan/updated";
+      params: z.infer<typeof AppServerTurnPlanUpdatedNotificationParamsSchema>;
+    }
+  | {
+      method: "item/started";
+      params: z.infer<typeof AppServerItemStartedNotificationParamsSchema>;
+    }
+  | {
+      method: "item/completed";
+      params: z.infer<typeof AppServerItemCompletedNotificationParamsSchema>;
+    }
+  | {
+      method: "item/agentMessage/delta";
+      params: z.infer<
+        typeof AppServerItemAgentMessageDeltaNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/commandExecution/outputDelta";
+      params: z.infer<
+        typeof AppServerItemCommandExecutionOutputDeltaNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/fileChange/outputDelta";
+      params: z.infer<
+        typeof AppServerItemFileChangeOutputDeltaNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/plan/delta";
+      params: z.infer<typeof AppServerItemPlanDeltaNotificationParamsSchema>;
+    }
+  | {
+      method: "item/reasoning/summaryPartAdded";
+      params: z.infer<
+        typeof AppServerItemReasoningSummaryPartAddedNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/reasoning/summaryTextDelta";
+      params: z.infer<
+        typeof AppServerItemReasoningSummaryTextDeltaNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/reasoning/textDelta";
+      params: z.infer<typeof AppServerItemReasoningTextDeltaNotificationParamsSchema>;
+    }
+  | {
+      method: "item/mcpToolCall/progress";
+      params: z.infer<
+        typeof AppServerItemMcpToolCallProgressNotificationParamsSchema
+      >;
+    };
+
+type AppServerSupportedServerNotificationInput =
+  | {
+      method: "thread/started";
+      params: z.input<typeof AppServerThreadStartedNotificationParamsSchema>;
+    }
+  | {
+      method: "thread/name/updated";
+      params: z.input<typeof AppServerThreadNameUpdatedNotificationParamsSchema>;
+    }
+  | {
+      method: "thread/tokenUsage/updated";
+      params: z.input<
+        typeof AppServerThreadTokenUsageUpdatedNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "turn/started";
+      params: z.input<typeof AppServerTurnStartedNotificationParamsSchema>;
+    }
+  | {
+      method: "turn/completed";
+      params: z.input<typeof AppServerTurnCompletedNotificationParamsSchema>;
+    }
+  | {
+      method: "turn/diff/updated";
+      params: z.input<typeof AppServerTurnDiffUpdatedNotificationParamsSchema>;
+    }
+  | {
+      method: "turn/plan/updated";
+      params: z.input<typeof AppServerTurnPlanUpdatedNotificationParamsSchema>;
+    }
+  | {
+      method: "item/started";
+      params: z.input<typeof AppServerItemStartedNotificationParamsSchema>;
+    }
+  | {
+      method: "item/completed";
+      params: z.input<typeof AppServerItemCompletedNotificationParamsSchema>;
+    }
+  | {
+      method: "item/agentMessage/delta";
+      params: z.input<
+        typeof AppServerItemAgentMessageDeltaNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/commandExecution/outputDelta";
+      params: z.input<
+        typeof AppServerItemCommandExecutionOutputDeltaNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/fileChange/outputDelta";
+      params: z.input<
+        typeof AppServerItemFileChangeOutputDeltaNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/plan/delta";
+      params: z.input<typeof AppServerItemPlanDeltaNotificationParamsSchema>;
+    }
+  | {
+      method: "item/reasoning/summaryPartAdded";
+      params: z.input<
+        typeof AppServerItemReasoningSummaryPartAddedNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/reasoning/summaryTextDelta";
+      params: z.input<
+        typeof AppServerItemReasoningSummaryTextDeltaNotificationParamsSchema
+      >;
+    }
+  | {
+      method: "item/reasoning/textDelta";
+      params: z.input<typeof AppServerItemReasoningTextDeltaNotificationParamsSchema>;
+    }
+  | {
+      method: "item/mcpToolCall/progress";
+      params: z.input<
+        typeof AppServerItemMcpToolCallProgressNotificationParamsSchema
+      >;
+    };
+
+export const AppServerSupportedServerNotificationSchema: z.ZodType<
+  AppServerSupportedServerNotification,
+  z.ZodTypeDef,
+  AppServerSupportedServerNotificationInput
+> =
+  z.discriminatedUnion("method", [
+    z.object({
+      method: z.literal("thread/started"),
+      params: AppServerThreadStartedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("thread/name/updated"),
+      params: AppServerThreadNameUpdatedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("thread/tokenUsage/updated"),
+      params: AppServerThreadTokenUsageUpdatedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("turn/started"),
+      params: AppServerTurnStartedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("turn/completed"),
+      params: AppServerTurnCompletedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("turn/diff/updated"),
+      params: AppServerTurnDiffUpdatedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("turn/plan/updated"),
+      params: AppServerTurnPlanUpdatedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/started"),
+      params: AppServerItemStartedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/completed"),
+      params: AppServerItemCompletedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/agentMessage/delta"),
+      params: AppServerItemAgentMessageDeltaNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/commandExecution/outputDelta"),
+      params: AppServerItemCommandExecutionOutputDeltaNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/fileChange/outputDelta"),
+      params: AppServerItemFileChangeOutputDeltaNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/plan/delta"),
+      params: AppServerItemPlanDeltaNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/reasoning/summaryPartAdded"),
+      params: AppServerItemReasoningSummaryPartAddedNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/reasoning/summaryTextDelta"),
+      params: AppServerItemReasoningSummaryTextDeltaNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/reasoning/textDelta"),
+      params: AppServerItemReasoningTextDeltaNotificationParamsSchema
+    }).strict(),
+    z.object({
+      method: z.literal("item/mcpToolCall/progress"),
+      params: AppServerItemMcpToolCallProgressNotificationParamsSchema
+    }).strict()
+  ]);
+
 export type AppServerListThreadsResponse = z.infer<typeof AppServerListThreadsResponseSchema>;
 export type AppServerReadThreadResponse = z.infer<typeof AppServerReadThreadResponseSchema>;
 export type AppServerListModelsResponse = z.infer<typeof AppServerListModelsResponseSchema>;
@@ -214,5 +603,15 @@ export function parseAppServerGetAccountRateLimitsResponse(
     AppServerGetAccountRateLimitsResponseSchema,
     value,
     "AppServerGetAccountRateLimitsResponse"
+  );
+}
+
+export function parseAppServerSupportedServerNotification(
+  value: z.input<typeof AppServerSupportedServerNotificationSchema>
+): AppServerSupportedServerNotification {
+  return parseWithSchema(
+    AppServerSupportedServerNotificationSchema,
+    value,
+    "AppServerSupportedServerNotification"
   );
 }

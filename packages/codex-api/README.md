@@ -1,6 +1,6 @@
 # @farfield/api
 
-Typed client layer for the Codex app-server and desktop IPC.
+Typed client layer for the Codex app-server.
 
 ## Goals
 
@@ -13,15 +13,6 @@ Typed client layer for the Codex app-server and desktop IPC.
 - `AppServerClient`
   - Typed requests to `codex app-server`.
   - Strict response validation.
-- `DesktopIpcClient`
-  - Socket framing and strict IPC frame validation.
-  - Request/response handling with explicit timeouts.
-- `CodexMonitorService`
-  - High-level actions:
-    - send message
-    - set collaboration mode
-    - submit user input
-    - interrupt turn
 - `reduceThreadStreamEvents`
   - Strict reducer for thread stream snapshots and patches.
 
@@ -36,31 +27,23 @@ Typed client layer for the Codex app-server and desktop IPC.
 
 ```ts
 import {
-  CodexMonitorService,
-  DesktopIpcClient,
-  findLatestTurnParamsTemplate
+  AppServerClient,
+  WebSocketAppServerTransport
 } from "@farfield/api";
 import { parseThreadConversationState } from "@farfield/protocol";
 
-const ipc = new DesktopIpcClient({
-  socketPath: "/tmp/codex-ipc/ipc-501.sock"
-});
-
-await ipc.connect();
-await ipc.initialize("farfield/0.2.0");
-
-const service = new CodexMonitorService(ipc);
-
-const liveStatePayload = await fetch("http://127.0.0.1:4311/api/threads/thread-id/live-state").then((r) =>
-  r.json()
+const client = new AppServerClient(
+  new WebSocketAppServerTransport({
+    url: "ws://127.0.0.1:4320",
+    userAgent: "farfield/dev"
+  })
 );
-const conversationState = parseThreadConversationState(liveStatePayload.conversationState);
-const turnStartTemplate = findLatestTurnParamsTemplate(conversationState);
 
-await service.sendMessage({
-  threadId: "thread-id",
-  ownerClientId: "desktop-client-id",
-  text: "hello",
-  turnStartTemplate
+const thread = await client.readThread("thread-id", true);
+const conversationState = parseThreadConversationState(thread.thread);
+await client.sendTurn({
+  threadId: conversationState.id,
+  input: [{ type: "text", text: "hello" }],
+  attachments: []
 });
 ```

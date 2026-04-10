@@ -18,7 +18,7 @@ This is an independent project and is not affiliated with, endorsed by, or spons
 - Chat view with model/reasoning controls
 - Plan mode toggle
 - Live agent monitoring and interrupts
-- Debug tab with full IPC history
+- Debug tab with full app event history
 
 ## Quick start (recommended)
 
@@ -35,6 +35,18 @@ bunx @farfield/server@latest
 ```
 
 This runs the backend on `127.0.0.1:4311` by default.
+
+Start Codex app-server separately and point Farfield at it:
+
+```bash
+# terminal 1
+codex app-server --listen ws://127.0.0.1:4320
+
+# terminal 2
+CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 npx -y @farfield/server@latest
+```
+
+Farfield connects to Codex through `CODEX_APP_SERVER_URL`.
 
 You can pass server flags too to customize the agents (default is only Codex):
 
@@ -68,6 +80,16 @@ bun run server
 
 `bun run server` runs only the backend on `0.0.0.0:4311`.
 
+If you are using Codex CLI only, start Codex app-server first and then launch Farfield against it:
+
+```bash
+# terminal 1
+codex app-server --listen ws://127.0.0.1:4320
+
+# terminal 2
+CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 bun run server
+```
+
 If you need to pick agent providers:
 
 ```bash
@@ -97,6 +119,22 @@ bun run dev -- --agents=codex,opencode       # both
 bun run dev -- --agents=all                  # expands to codex,opencode
 bun run dev:remote                           # exposes frontend + backend on your network
 bun run dev:remote -- --agents=opencode      # remote mode with OpenCode only
+```
+
+If you are developing against Codex CLI only, use the same app-server setup in another terminal:
+
+```bash
+# terminal 1
+codex app-server --listen ws://127.0.0.1:4320
+
+# terminal 2
+CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 bun run dev
+```
+
+Or for network-exposed local development:
+
+```bash
+CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 bun run dev:remote
 ```
 
 > **Warning:** `dev:remote` exposes Farfield with no authentication. Only use on trusted networks.
@@ -165,6 +203,15 @@ bun run --filter @farfield/web preview -- --host 127.0.0.1 --port 4313 --strictP
 - Node.js 20+
 - Bun 1.2+ (needed for source checkout workflow)
 - Codex or OpenCode installed locally
+
+### Codex modes
+
+Farfield uses Codex through `codex app-server`.
+
+Useful environment variables:
+
+- `CODEX_APP_SERVER_URL`: WebSocket URL for a separately started Codex app-server, for example `ws://127.0.0.1:4320`
+- `CODEX_CLI_PATH`: path to the `codex` executable if it is not on `PATH`
 
 ## More details on Tailscale setup
 

@@ -23,10 +23,3 @@ export class AppServerRpcError extends AppServerError {
     this.data = data;
   }
 }
-
-export class DesktopIpcError extends Error {
-  public constructor(message: string) {
-    super(message);
-    this.name = "DesktopIpcError";
-  }
-}

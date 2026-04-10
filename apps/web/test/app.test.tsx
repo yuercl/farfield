@@ -517,8 +517,8 @@ vi.stubGlobal(
         ok: true,
         state: {
           appReady: true,
-          ipcConnected: true,
-          ipcInitialized: true,
+          transportConnected: true,
+          transportInitialized: true,
           lastError: null,
           historyCount: 0,
           threadOwnerCount: 0,

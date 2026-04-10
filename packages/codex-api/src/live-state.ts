@@ -2,7 +2,7 @@ import {
   type ThreadConversationState,
   parseThreadConversationState,
   type ThreadStreamPatch,
-  type ThreadStreamStateChangedBroadcast
+  type ThreadStreamEvent
 } from "@farfield/protocol";
 
 function cloneState<T>(value: T): T {
@@ -122,7 +122,7 @@ export interface ThreadStreamReductionErrorDetails {
   threadId: string;
   eventIndex: number;
   patchIndex: number;
-  event: ThreadStreamStateChangedBroadcast;
+  event: ThreadStreamEvent;
   patch: ThreadStreamPatch;
 }
 
@@ -154,12 +154,12 @@ function toErrorMessage(error: unknown): string {
 }
 
 export function reduceThreadStreamEvents(
-  events: ThreadStreamStateChangedBroadcast[]
+  events: ThreadStreamEvent[]
 ): Map<string, ThreadStreamDerivedState> {
   const byThread = new Map<string, ThreadStreamDerivedState>();
 
   for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
-    const event = events[eventIndex] as ThreadStreamStateChangedBroadcast;
+    const event = events[eventIndex] as ThreadStreamEvent;
     const threadId = event.params.conversationId;
     const previous = byThread.get(threadId) ?? {
       ownerClientId: null,

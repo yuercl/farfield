@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { parseThreadStreamStateChangedBroadcast } from "@farfield/protocol";
+import { parseThreadStreamEvent } from "@farfield/protocol";
 import { reduceThreadStreamEvents, ThreadStreamReductionError } from "../src/live-state.js";
 
 describe("live-state reducer", () => {
   it("applies snapshot then patches", () => {
-    const snapshotEvent = parseThreadStreamStateChangedBroadcast({
+    const snapshotEvent = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-a",
@@ -34,7 +34,7 @@ describe("live-state reducer", () => {
       }
     });
 
-    const patchEvent = parseThreadStreamStateChangedBroadcast({
+    const patchEvent = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-a",
@@ -88,7 +88,7 @@ describe("live-state reducer", () => {
   });
 
   it("throws when patches arrive before snapshot", () => {
-    const patchEvent = parseThreadStreamStateChangedBroadcast({
+    const patchEvent = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-a",
@@ -113,7 +113,7 @@ describe("live-state reducer", () => {
       }
     });
 
-    const snapshotEvent = parseThreadStreamStateChangedBroadcast({
+    const snapshotEvent = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-a",
@@ -139,7 +139,7 @@ describe("live-state reducer", () => {
   });
 
   it("throws reduction error with raw payload details when patch introduces invalid item type", () => {
-    const snapshotEvent = parseThreadStreamStateChangedBroadcast({
+    const snapshotEvent = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-a",
@@ -170,7 +170,7 @@ describe("live-state reducer", () => {
       }
     });
 
-    const patchEvent = parseThreadStreamStateChangedBroadcast({
+    const patchEvent = parseThreadStreamEvent({
       type: "broadcast",
       method: "thread-stream-state-changed",
       sourceClientId: "client-a",

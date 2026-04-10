@@ -28,7 +28,7 @@ node skills/codex-window-debug/tools/codex-window-screenshot.mjs ~/Desktop/codex
 
 1. Check server health
 ```bash
-curl -sS 'http://localhost:4311/api/health' | jq '.state.ipcConnected, .state.ipcInitialized, .state.lastError'
+curl -sS 'http://localhost:4311/api/health' | jq '.state.transportConnected, .state.transportInitialized, .state.lastError'
 ```
 
 2. Send a test message to a target thread

@@ -82,6 +82,12 @@ import {
   type UnifiedFeatureId,
   type UnifiedInputPart,
 } from "@farfield/unified-surface";
+import {
+  parseThreadStreamEvent,
+  type ThreadConversationState as ProtocolThreadConversationState,
+  type ThreadStreamEvent,
+} from "@farfield/protocol";
+import { reduceThreadStreamEvents } from "../../../packages/codex-api/src/live-state";
 import { useTheme } from "@/hooks/useTheme";
 import { ChatTimeline, type ChatTimelineEntry } from "@/components/ChatTimeline";
 import { ChatComposer } from "@/components/ChatComposer";
@@ -145,6 +151,8 @@ type ConversationTurn = NonNullable<
   ReadThreadResponse["thread"]
 >["turns"][number];
 type ConversationTurnItem = NonNullable<ConversationTurn["items"]>[number];
+type ProtocolConversationTurn = ProtocolThreadConversationState["turns"][number];
+type ProtocolConversationTurnItem = ProtocolConversationTurn["items"][number];
 type FlatConversationItem = ChatTimelineEntry;
 
 interface RefreshFlags {
@@ -523,11 +531,7 @@ function mergeIncomingThreads(
 
 function toErrorMessage(err: unknown): string {
   const normalize = (message: string): string => {
-    if (
-      message === "Desktop IPC is not connected" ||
-      message ===
-        "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings."
-    ) {
+    if (message === "Codex app-server is not connected") {
       return "";
     }
     return message;
@@ -721,9 +725,7 @@ const ASSUMED_APP_DEFAULT_MODEL = "gpt-5.3-codex";
 const ASSUMED_APP_DEFAULT_EFFORT = "medium";
 const AGENT_CACHE_TTL_MS = 30_000;
 const PROVIDER_CATALOG_CACHE_TTL_MS = 20_000;
-const CORE_REFRESH_INTERVAL_MS = 5_000;
-const SELECTED_THREAD_REFRESH_INTERVAL_MS = 1_000;
-const SELECTED_THREAD_REFRESH_INTERVAL_MS_WITH_SSE = 10_000;
+const APP_SERVER_OWNER_CLIENT_ID = "app-server";
 const DEBUG_UI_ENABLED = import.meta.env.MODE !== "production";
 const MOBILE_SIDEBAR_WIDTH_PX = 256;
 const MOBILE_SWIPE_EDGE_PX = 24;
@@ -985,6 +987,25 @@ function conversationProgressSignature(
   ].join("|");
 }
 
+function conversationContentSignature(
+  state: NonNullable<ReadThreadResponse["thread"]> | null | undefined,
+): string {
+  if (!state) {
+    return "";
+  }
+
+  const lastTurn = state.turns[state.turns.length - 1];
+  if (!lastTurn) {
+    return "no-turn-content";
+  }
+
+  return JSON.stringify({
+    status: lastTurn.status,
+    items: lastTurn.items,
+    requests: state.requests,
+  });
+}
+
 function buildLiveStateSyncSignature(
   state: LiveStateResponse | null | undefined,
 ): string {
@@ -1000,6 +1021,7 @@ function buildLiveStateSyncSignature(
     String(conversationState?.turns.length ?? -1),
     modeSelectionSignatureFromConversationState(conversationState),
     conversationProgressSignature(conversationState),
+    conversationContentSignature(conversationState),
   ].join("|");
 }
 
@@ -1017,7 +1039,309 @@ function buildReadThreadSyncSignature(
     String(conversationState.turns.length),
     modeSelectionSignatureFromConversationState(conversationState),
     conversationProgressSignature(conversationState),
+    conversationContentSignature(conversationState),
   ].join("|");
+}
+
+function parseThreadStreamBroadcasts(
+  events: StreamEventsResponse["events"],
+): ThreadStreamEvent[] {
+  const broadcasts: ThreadStreamEvent[] = [];
+
+  for (const event of events) {
+    try {
+      broadcasts.push(parseThreadStreamEvent(event));
+    } catch {}
+  }
+
+  return broadcasts;
+}
+
+function mapProtocolCommandActions(
+  item: Extract<ProtocolConversationTurnItem, { type: "commandExecution" }>,
+): Extract<ConversationTurnItem, { type: "commandExecution" }>["commandActions"] {
+  if (!item.commandActions) {
+    return undefined;
+  }
+
+  return item.commandActions.map((action: (typeof item.commandActions)[number]) => ({
+    type: action.type,
+    ...(action.command !== undefined ? { command: action.command } : {}),
+    ...(action.name !== undefined ? { name: action.name } : {}),
+    ...(action.path !== undefined ? { path: action.path } : {}),
+    ...(action.query !== undefined ? { query: action.query } : {}),
+  }));
+}
+
+function mapSupportedProtocolItemToUnifiedItem(
+  item: ProtocolConversationTurnItem,
+): ConversationTurnItem | null {
+  switch (item.type) {
+    case "agentMessage":
+      return {
+        id: item.id,
+        type: "agentMessage",
+        text: item.text,
+      };
+
+    case "plan":
+      return {
+        id: item.id,
+        type: "plan",
+        text: item.text,
+      };
+
+    case "reasoning":
+      return {
+        id: item.id,
+        type: "reasoning",
+        ...(item.summary !== undefined ? { summary: item.summary } : {}),
+        ...(item.text !== undefined ? { text: item.text } : {}),
+      };
+
+    case "commandExecution":
+      return {
+        id: item.id,
+        type: "commandExecution",
+        command: item.command,
+        status: item.status,
+        ...(item.cwd !== undefined ? { cwd: item.cwd } : {}),
+        ...(item.processId !== undefined ? { processId: item.processId } : {}),
+        ...(item.commandActions !== undefined
+          ? { commandActions: mapProtocolCommandActions(item) }
+          : {}),
+        ...(item.aggregatedOutput !== undefined
+          ? { aggregatedOutput: item.aggregatedOutput }
+          : {}),
+        ...(item.exitCode !== undefined ? { exitCode: item.exitCode } : {}),
+        ...(item.durationMs !== undefined ? { durationMs: item.durationMs } : {}),
+      };
+
+    default:
+      return null;
+  }
+}
+
+function mergeSupportedStreamingItem(
+  baseItem: ConversationTurnItem,
+  streamedItem: ConversationTurnItem,
+): ConversationTurnItem {
+  if (baseItem.type !== streamedItem.type || baseItem.id !== streamedItem.id) {
+    return baseItem;
+  }
+
+  switch (baseItem.type) {
+    case "agentMessage":
+      if (streamedItem.type !== "agentMessage") {
+        return baseItem;
+      }
+      return {
+        ...baseItem,
+        text: streamedItem.text,
+      };
+
+    case "plan":
+      if (streamedItem.type !== "plan") {
+        return baseItem;
+      }
+      return {
+        ...baseItem,
+        text: streamedItem.text,
+      };
+
+    case "reasoning":
+      if (streamedItem.type !== "reasoning") {
+        return baseItem;
+      }
+      return {
+        ...baseItem,
+        ...(streamedItem.summary !== undefined
+          ? { summary: streamedItem.summary }
+          : {}),
+        ...(streamedItem.text !== undefined ? { text: streamedItem.text } : {}),
+      };
+
+    case "commandExecution":
+      if (streamedItem.type !== "commandExecution") {
+        return baseItem;
+      }
+      return {
+        ...baseItem,
+        command: streamedItem.command,
+        status: streamedItem.status,
+        ...(streamedItem.cwd !== undefined ? { cwd: streamedItem.cwd } : {}),
+        ...(streamedItem.processId !== undefined
+          ? { processId: streamedItem.processId }
+          : {}),
+        ...(streamedItem.commandActions !== undefined
+          ? { commandActions: streamedItem.commandActions }
+          : {}),
+        ...(streamedItem.aggregatedOutput !== undefined
+          ? { aggregatedOutput: streamedItem.aggregatedOutput }
+          : {}),
+        ...(streamedItem.exitCode !== undefined
+          ? { exitCode: streamedItem.exitCode }
+          : {}),
+        ...(streamedItem.durationMs !== undefined
+          ? { durationMs: streamedItem.durationMs }
+          : {}),
+      };
+
+    default:
+      return baseItem;
+  }
+}
+
+function protocolTurnIdentity(
+  threadId: string,
+  turn: ProtocolConversationTurn,
+  turnIndex: number,
+): string {
+  return turn.id ?? turn.turnId ?? `${threadId}-${String(turnIndex + 1)}`;
+}
+
+function unifiedTurnIdentity(turn: ConversationTurn): string {
+  return turn.id ?? turn.turnId ?? "";
+}
+
+function mapSupportedProtocolTurnToUnifiedTurn(
+  threadId: string,
+  turn: ProtocolConversationTurn,
+  turnIndex: number,
+): ConversationTurn | null {
+  const mappedItems = turn.items
+    .map(mapSupportedProtocolItemToUnifiedItem)
+    .filter(
+      (item: ConversationTurnItem | null): item is ConversationTurnItem =>
+        item !== null,
+    );
+
+  if (mappedItems.length === 0) {
+    return null;
+  }
+
+  return {
+    id: protocolTurnIdentity(threadId, turn, turnIndex),
+    ...(turn.turnId !== undefined ? { turnId: turn.turnId } : {}),
+    status: turn.status,
+    ...(turn.turnStartedAtMs !== undefined
+      ? { turnStartedAtMs: turn.turnStartedAtMs }
+      : {}),
+    ...(turn.finalAssistantStartedAtMs !== undefined
+      ? { finalAssistantStartedAtMs: turn.finalAssistantStartedAtMs }
+      : {}),
+    items: mappedItems,
+  };
+}
+
+function mergeStreamConversationState(
+  baseState: NonNullable<ReadThreadResponse["thread"]> | null | undefined,
+  streamedState: ProtocolThreadConversationState | null,
+): NonNullable<ReadThreadResponse["thread"]> | null {
+  if (!baseState || !streamedState || baseState.id !== streamedState.id) {
+    return baseState ?? null;
+  }
+
+  const mergedTurns = [...baseState.turns];
+
+  for (
+    let streamedTurnIndex = 0;
+    streamedTurnIndex < streamedState.turns.length;
+    streamedTurnIndex += 1
+  ) {
+    const streamedTurn = streamedState.turns[streamedTurnIndex];
+    if (!streamedTurn) {
+      continue;
+    }
+
+    const streamedTurnKey = protocolTurnIdentity(
+      streamedState.id,
+      streamedTurn,
+      streamedTurnIndex,
+    );
+    const existingTurnIndex = mergedTurns.findIndex(
+      (turn) => unifiedTurnIdentity(turn) === streamedTurnKey,
+    );
+
+    if (existingTurnIndex === -1) {
+      const appendedTurn = mapSupportedProtocolTurnToUnifiedTurn(
+        streamedState.id,
+        streamedTurn,
+        streamedTurnIndex,
+      );
+      if (appendedTurn) {
+        mergedTurns.push(appendedTurn);
+      }
+      continue;
+    }
+
+    const existingTurn = mergedTurns[existingTurnIndex];
+    if (!existingTurn) {
+      continue;
+    }
+
+    const mergedItems = [...existingTurn.items];
+    for (const streamedItem of streamedTurn.items) {
+      const mappedStreamedItem = mapSupportedProtocolItemToUnifiedItem(
+        streamedItem,
+      );
+      if (!mappedStreamedItem) {
+        continue;
+      }
+
+      const existingItemIndex = mergedItems.findIndex(
+        (item) => item.id === mappedStreamedItem.id,
+      );
+      if (existingItemIndex === -1) {
+        mergedItems.push(mappedStreamedItem);
+        continue;
+      }
+
+      const existingItem = mergedItems[existingItemIndex];
+      if (!existingItem) {
+        continue;
+      }
+
+      mergedItems[existingItemIndex] = mergeSupportedStreamingItem(
+        existingItem,
+        mappedStreamedItem,
+      );
+    }
+
+    mergedTurns[existingTurnIndex] = {
+      ...existingTurn,
+      status: streamedTurn.status,
+      ...(streamedTurn.turnStartedAtMs !== undefined
+        ? { turnStartedAtMs: streamedTurn.turnStartedAtMs }
+        : {}),
+      ...(streamedTurn.finalAssistantStartedAtMs !== undefined
+        ? { finalAssistantStartedAtMs: streamedTurn.finalAssistantStartedAtMs }
+        : {}),
+      items: mergedItems,
+    };
+  }
+
+  return {
+    ...baseState,
+    turns: mergedTurns,
+    ...(streamedState.updatedAt !== undefined
+      ? {
+          updatedAt:
+            baseState.updatedAt !== undefined
+              ? Math.max(baseState.updatedAt, streamedState.updatedAt)
+              : streamedState.updatedAt,
+        }
+      : {}),
+    ...(streamedState.title !== undefined ? { title: streamedState.title } : {}),
+    ...(streamedState.latestModel !== undefined
+      ? { latestModel: streamedState.latestModel ?? null }
+      : {}),
+    ...(streamedState.latestReasoningEffort !== undefined
+      ? {
+          latestReasoningEffort: streamedState.latestReasoningEffort ?? null,
+        }
+      : {}),
+  };
 }
 
 function basenameFromPath(value: string): string {
@@ -1034,10 +1358,21 @@ function normalizeManualGroupOrder(
   autoSortedKeys: readonly string[],
 ): string[] {
   const availableKeys = new Set(autoSortedKeys);
+  const legacyKeyMap = new Map<string, string>();
+  for (const key of autoSortedKeys) {
+    const projectMarker = ":project:";
+    const projectIndex = key.indexOf(projectMarker);
+    if (projectIndex === -1) {
+      continue;
+    }
+    const projectPath = key.slice(projectIndex + projectMarker.length);
+    legacyKeyMap.set(`project:${projectPath}`, key);
+  }
   const seen = new Set<string>();
   const normalized: string[] = [];
 
-  for (const key of manualOrder) {
+  for (const rawKey of manualOrder) {
+    const key = legacyKeyMap.get(rawKey) ?? rawKey;
     if (!availableKeys.has(key) || seen.has(key)) {
       continue;
     }
@@ -1377,8 +1712,6 @@ export function App(): React.JSX.Element {
     refreshHistory: false,
     refreshSelectedThread: false,
   });
-  const coreRefreshIntervalRef = useRef<number | null>(null);
-  const selectedThreadRefreshIntervalRef = useRef<number | null>(null);
   const mobileSidebarSwipeRef = useRef<MobileSidebarSwipeGesture | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const chatContentRef = useRef<HTMLDivElement>(null);
@@ -1536,6 +1869,9 @@ export function App(): React.JSX.Element {
       userColor: string | null;
     };
     const groups = new Map<string, Group>();
+    const shouldIncludeServerLabel =
+      savedServerTargets.length > 1 ||
+      new Set(threads.map((thread) => thread.serverId)).size > 1;
 
     for (const thread of threads) {
       const cwd =
@@ -1547,8 +1883,12 @@ export function App(): React.JSX.Element {
         ? `server:${thread.serverId}:project:${projectPath}`
         : `server:${thread.serverId}:project:unknown`;
       const label = projectPath
-        ? `${basenameFromPath(projectPath)} · ${thread.serverLabel}`
-        : `Unknown · ${thread.serverLabel}`;
+        ? shouldIncludeServerLabel
+          ? `${basenameFromPath(projectPath)} · ${thread.serverLabel}`
+          : basenameFromPath(projectPath)
+        : shouldIncludeServerLabel
+          ? `Unknown · ${thread.serverLabel}`
+          : "Unknown";
       const updatedAt = threadRecencyTimestamp(thread);
       const threadAgentId = thread.provider;
       const projectColor = projectColors[key] ?? null;
@@ -1617,8 +1957,15 @@ export function App(): React.JSX.Element {
     );
 
     return allGroups;
-  }, [agentDescriptors, primaryServerTarget?.id, projectColors, sidebarOrder, threads]);
-  const conversationState = useMemo(() => {
+  }, [
+    agentDescriptors,
+    primaryServerTarget?.id,
+    projectColors,
+    savedServerTargets.length,
+    sidebarOrder,
+    threads,
+  ]);
+  const baseConversationState = useMemo(() => {
     const liveConversationState = liveState?.conversationState ?? null;
     const readConversationState = readThreadState?.thread ?? null;
     if (!liveConversationState) {
@@ -1644,6 +1991,27 @@ export function App(): React.JSX.Element {
 
     return liveConversationState;
   }, [liveState?.conversationState, readThreadState?.thread]);
+  const streamedConversationState = useMemo(() => {
+    if (!selectedThreadId || streamEvents.length === 0) {
+      return null;
+    }
+
+    const broadcasts = parseThreadStreamBroadcasts(streamEvents);
+    if (broadcasts.length === 0) {
+      return null;
+    }
+
+    const reducedStates = reduceThreadStreamEvents(broadcasts);
+    return reducedStates.get(selectedThreadId)?.conversationState ?? null;
+  }, [selectedThreadId, streamEvents]);
+  const conversationState = useMemo(
+    () =>
+      mergeStreamConversationState(
+        baseConversationState,
+        streamedConversationState,
+      ),
+    [baseConversationState, streamedConversationState],
+  );
   const requestSourceState = useMemo(() => {
     const liveConversationState = liveState?.conversationState ?? null;
     const readConversationState = readThreadState?.thread ?? null;
@@ -2045,9 +2413,7 @@ export function App(): React.JSX.Element {
     (descriptor) => descriptor.enabled && descriptor.connected,
   ).length;
   const visibleHealthError =
-    health?.state.lastError === "Desktop IPC is not connected" ||
-    health?.state.lastError ===
-      "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings."
+    health?.state.lastError === "Codex app-server is not connected"
       ? null
       : health?.state.lastError ?? null;
   const allSystemsReady =
@@ -2935,126 +3301,24 @@ export function App(): React.JSX.Element {
       }
       void loadCore().catch((e) => setError(toErrorMessage(e)));
     };
-    const resumeCoreRefresh = () => {
-      startCoreRefresh();
+    refreshCoreData();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      refreshCoreData();
+    };
+    const onPageShow = () => {
       refreshCoreData();
     };
 
-    const startCoreRefresh = () => {
-      if (coreRefreshIntervalRef.current !== null) {
-        return;
-      }
-      coreRefreshIntervalRef.current = window.setInterval(
-        refreshCoreData,
-        CORE_REFRESH_INTERVAL_MS,
-      );
-    };
-
-    const stopCoreRefresh = () => {
-      if (coreRefreshIntervalRef.current === null) {
-        return;
-      }
-      window.clearInterval(coreRefreshIntervalRef.current);
-      coreRefreshIntervalRef.current = null;
-    };
-
-    resumeCoreRefresh();
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "hidden") {
-        stopCoreRefresh();
-        return;
-      }
-      resumeCoreRefresh();
-    };
-    const onPageHide = () => {
-      stopCoreRefresh();
-    };
-    const onPageShow = () => {
-      resumeCoreRefresh();
-    };
-
     document.addEventListener("visibilitychange", onVisibilityChange);
-    window.addEventListener("pagehide", onPageHide);
     window.addEventListener("pageshow", onPageShow);
     return () => {
-      stopCoreRefresh();
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      window.removeEventListener("pagehide", onPageHide);
       window.removeEventListener("pageshow", onPageShow);
     };
   }, []);
-
-  useEffect(() => {
-    const stopSelectedThreadRefresh = () => {
-      if (selectedThreadRefreshIntervalRef.current === null) {
-        return;
-      }
-      window.clearInterval(selectedThreadRefreshIntervalRef.current);
-      selectedThreadRefreshIntervalRef.current = null;
-    };
-
-    if (!selectedThreadId) {
-      stopSelectedThreadRefresh();
-      return;
-    }
-
-    const refreshSelectedThreadData = () => {
-      if (document.visibilityState === "hidden") {
-        return;
-      }
-      const load = loadSelectedThreadRef.current;
-      if (!load) {
-        return;
-      }
-      void load(selectedThreadId, {
-        includeTurns: true,
-        includeStreamEvents: activeTabRef.current === "debug",
-      }).catch((e) =>
-        setError(toErrorMessage(e)),
-      );
-    };
-    const resumeSelectedThreadRefresh = () => {
-      startSelectedThreadRefresh();
-      refreshSelectedThreadData();
-    };
-
-    const startSelectedThreadRefresh = () => {
-      if (selectedThreadRefreshIntervalRef.current !== null) {
-        return;
-      }
-      selectedThreadRefreshIntervalRef.current = window.setInterval(
-        refreshSelectedThreadData,
-        eventsConnected
-          ? SELECTED_THREAD_REFRESH_INTERVAL_MS_WITH_SSE
-          : SELECTED_THREAD_REFRESH_INTERVAL_MS,
-      );
-    };
-
-    resumeSelectedThreadRefresh();
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "hidden") {
-        stopSelectedThreadRefresh();
-        return;
-      }
-      resumeSelectedThreadRefresh();
-    };
-    const onPageHide = () => {
-      stopSelectedThreadRefresh();
-    };
-    const onPageShow = () => {
-      resumeSelectedThreadRefresh();
-    };
-
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    window.addEventListener("pagehide", onPageHide);
-    window.addEventListener("pageshow", onPageShow);
-    return () => {
-      stopSelectedThreadRefresh();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      window.removeEventListener("pagehide", onPageHide);
-      window.removeEventListener("pageshow", onPageShow);
-    };
-  }, [eventsConnected, selectedThreadId]);
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -3107,6 +3371,7 @@ export function App(): React.JSX.Element {
       if (refreshTimerRef.current) {
         window.clearTimeout(refreshTimerRef.current);
       }
+      const refreshDelayMs = refreshSelectedThread ? 50 : 200;
       refreshTimerRef.current = window.setTimeout(() => {
         refreshTimerRef.current = null;
         const flags = pendingRefreshFlagsRef.current;
@@ -3153,7 +3418,7 @@ export function App(): React.JSX.Element {
             setError(toErrorMessage(e));
           }
         })();
-      }, 200);
+      }, refreshDelayMs);
     };
 
     const scheduleReconnect = () => {
@@ -3211,11 +3476,75 @@ export function App(): React.JSX.Element {
               refreshCore = true;
             } else if (parsedEvent.kind === "threadUpdated") {
               refreshCore = true;
-              if (
-                selectedThreadIdRef.current &&
-                parsedEvent.threadId === selectedThreadIdRef.current
-              ) {
+              threadProviderByIdRef.current.set(
+                parsedEvent.threadId,
+                parsedEvent.provider,
+              );
+
+              startTransition(() => {
+                setThreads((previousThreads) => {
+                  const nextIsGenerating = isThreadGeneratingState(
+                    parsedEvent.thread,
+                  );
+                  const nextThreads = previousThreads.map((threadSummary) => {
+                    if (threadSummary.id !== parsedEvent.threadId) {
+                      return threadSummary;
+                    }
+
+                    return {
+                      ...threadSummary,
+                      updatedAt:
+                        parsedEvent.thread.updatedAt ?? threadSummary.updatedAt,
+                      isGenerating: nextIsGenerating,
+                      title: parsedEvent.thread.title ?? null,
+                    };
+                  });
+                  const nextSignature = buildThreadsSignature(nextThreads);
+                  if (
+                    signaturesMatch(threadsSignatureRef.current, nextSignature)
+                  ) {
+                    return previousThreads;
+                  }
+                  threadsSignatureRef.current = nextSignature;
+                  return nextThreads;
+                });
+              });
+
+              const nextLiveState: LiveStateResponse = {
+                ok: true,
+                threadId: parsedEvent.threadId,
+                ownerClientId: APP_SERVER_OWNER_CLIENT_ID,
+                conversationState: parsedEvent.thread,
+                liveStateError: null,
+              };
+              const nextReadThreadState: ReadThreadResponse = {
+                thread: parsedEvent.thread,
+              };
+              const cachedState =
+                threadViewStateCacheRef.current.get(parsedEvent.threadId) ??
+                null;
+              threadViewStateCacheRef.current.set(parsedEvent.threadId, {
+                liveState: nextLiveState,
+                readThreadState: nextReadThreadState,
+                streamEvents: cachedState?.streamEvents ?? [],
+              });
+
+              if (parsedEvent.threadId === selectedThreadIdRef.current) {
                 refreshSelectedThread = true;
+                startTransition(() => {
+                  setLiveState((previousState) =>
+                    buildLiveStateSyncSignature(previousState) ===
+                    buildLiveStateSyncSignature(nextLiveState)
+                      ? previousState
+                      : nextLiveState,
+                  );
+                  setReadThreadState((previousState) =>
+                    buildReadThreadSyncSignature(previousState) ===
+                    buildReadThreadSyncSignature(nextReadThreadState)
+                      ? previousState
+                      : nextReadThreadState,
+                  );
+                });
               }
             } else if (
               parsedEvent.kind === "userInputRequested" ||
@@ -3560,12 +3889,13 @@ export function App(): React.JSX.Element {
               ? { model: preferredNewThreadModelId }
               : {}),
           });
+          const createdModel = created.model ?? created.thread.latestModel;
           if (
             preferredNewThreadModelId &&
-            created.thread.latestModel !== preferredNewThreadModelId
+            createdModel !== preferredNewThreadModelId
           ) {
             throw new Error(
-              `Thread started with unexpected model: requested ${preferredNewThreadModelId}, received ${created.thread.latestModel || "none"}`,
+              `Thread started with unexpected model: requested ${preferredNewThreadModelId}, received ${createdModel || "none"}`,
             );
           }
           threadId = created.threadId;
@@ -3935,12 +4265,13 @@ export function App(): React.JSX.Element {
               }
             : {}),
         });
+        const createdModel = created.model ?? created.thread.latestModel;
         if (
           preferredNewThreadModelId &&
-          created.thread.latestModel !== preferredNewThreadModelId
+          createdModel !== preferredNewThreadModelId
         ) {
           throw new Error(
-            `Thread started with unexpected model: requested ${preferredNewThreadModelId}, received ${created.thread.latestModel || "none"}`,
+            `Thread started with unexpected model: requested ${preferredNewThreadModelId}, received ${createdModel || "none"}`,
           );
         }
         threadProviderByIdRef.current.set(created.threadId, targetAgentId);

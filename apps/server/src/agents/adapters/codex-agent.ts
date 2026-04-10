@@ -3,32 +3,23 @@ import {
   AppServerRpcError,
   AppServerTransportError,
   ChildProcessAppServerTransport,
-  CodexMonitorService,
-  DesktopIpcError,
-  DesktopIpcClient,
-  reduceThreadStreamEvents,
-  ThreadStreamReductionError,
-  WebSocketAppServerTransport,
-  type SendRequestOptions,
+  WebSocketAppServerTransport
 } from "@farfield/api";
 import {
-  ProtocolValidationError,
   parseCommandExecutionRequestApprovalResponse,
   parseFileChangeRequestApprovalResponse,
-  parseToolRequestUserInputResponsePayload,
   parseThreadConversationState,
-  parseThreadStreamStateChangedBroadcast,
+  parseToolRequestUserInputResponsePayload,
   parseUserInputResponsePayload,
-  type IpcFrame,
-  type IpcRequestFrame,
-  type IpcResponseFrame,
+  type AppServerGetAccountRateLimitsResponse,
+  type AppServerServerRequest,
+  type AppServerSupportedServerNotification,
+  type ClientEventEnvelope,
   type ThreadConversationRequest,
   type ThreadConversationState,
-  type ThreadStreamStateChangedBroadcast,
-  type UserInputRequestId,
+  type UserInputRequestId
 } from "@farfield/protocol";
 import { logger } from "../../logger.js";
-import { resolveOwnerClientId } from "../../thread-owner.js";
 import type {
   AgentAdapter,
   AgentCapabilities,
@@ -40,40 +31,49 @@ import type {
   AgentReadThreadInput,
   AgentReadThreadResult,
   AgentSendMessageInput,
-  AgentSetCollaborationModeInput,
   AgentSubmitUserInputInput,
   AgentThreadLiveState,
-  AgentThreadStreamEvents,
+  AgentThreadStreamEvents
 } from "../types.js";
 
-type StreamSnapshotOrigin = "stream" | "readThreadWithTurns" | "readThread";
+type ThreadTurn = ThreadConversationState["turns"][number];
+type ThreadItem = ThreadTurn["items"][number];
+type AgentMessageItem = Extract<ThreadItem, { type: "agentMessage" }>;
+type PlanItem = Extract<ThreadItem, { type: "plan" }>;
+type ReasoningItem = Extract<ThreadItem, { type: "reasoning" }>;
+type CommandExecutionItem = Extract<ThreadItem, { type: "commandExecution" }>;
 
 export interface CodexAgentRuntimeState {
   appReady: boolean;
-  ipcConnected: boolean;
-  ipcInitialized: boolean;
+  transportConnected: boolean;
+  transportInitialized: boolean;
   codexAvailable: boolean;
   lastError: string | null;
 }
 
-export interface CodexIpcFrameEvent {
-  direction: "in" | "out";
-  frame: IpcFrame;
+export interface CodexAppEvent {
+  direction: "in";
+  payload: AppServerServerRequest | AppServerSupportedServerNotification;
   method: string;
   threadId: string | null;
 }
 
+export interface CodexThreadRealtimeEvent {
+  threadId: string;
+  thread: ThreadConversationState;
+}
+
 export interface CodexAgentOptions {
   appExecutable: string;
-  socketPath: string;
   workspaceDir: string;
   userAgent: string;
-  reconnectDelayMs: number;
   appServerUrl?: string;
   onStateChange?: () => void;
 }
 
 const ANSI_ESCAPE_REGEX = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+const APP_SERVER_OWNER_CLIENT_ID = "app-server";
+const MAX_STREAM_EVENTS = 400;
 
 export function normalizeCodexRuntimeErrorMessage(message: string): string {
   const normalized = message.trim().toLowerCase();
@@ -82,10 +82,6 @@ export function normalizeCodexRuntimeErrorMessage(message: string): string {
     normalized.includes("read rate limits")
   ) {
     return "Rate limits unavailable until ChatGPT authentication is connected.";
-  }
-
-  if (normalized.includes("connect enoent") && normalized.includes("codex-ipc")) {
-    return "Codex desktop IPC socket not found. Start Codex desktop or update the IPC socket path in settings.";
   }
 
   return message;
@@ -97,58 +93,47 @@ export class CodexAgentAdapter implements AgentAdapter {
   public readonly capabilities: AgentCapabilities = {
     canListModels: true,
     canListCollaborationModes: true,
-    canSetCollaborationMode: true,
+    canSetCollaborationMode: false,
     canSubmitUserInput: true,
     canReadLiveState: true,
     canReadStreamEvents: true,
-    canReadRateLimits: true,
+    canReadRateLimits: true
   };
 
   private readonly appClient: AppServerClient;
-  private readonly ipcClient: DesktopIpcClient;
-  private readonly service: CodexMonitorService;
   private readonly onStateChange: (() => void) | null;
-  private readonly reconnectDelayMs: number;
-  private readonly desktopIpcEnabled: boolean;
 
   private readonly threadOwnerById = new Map<string, string>();
-  private readonly streamEventsByThreadId = new Map<string, IpcFrame[]>();
+  private readonly streamEventsByThreadId = new Map<string, ClientEventEnvelope[]>();
   private readonly streamSnapshotByThreadId = new Map<
     string,
     ThreadConversationState
   >();
-  private readonly streamSnapshotOriginByThreadId = new Map<
-    string,
-    StreamSnapshotOrigin
-  >();
   private readonly threadTitleById = new Map<string, string | null>();
-  private readonly ipcFrameListeners = new Set<
-    (event: CodexIpcFrameEvent) => void
+  private readonly appEventListeners = new Set<(event: CodexAppEvent) => void>();
+  private readonly realtimeThreadListeners = new Set<
+    (event: CodexThreadRealtimeEvent) => void
   >();
-  private lastKnownOwnerClientId: string | null = null;
 
   private runtimeState: CodexAgentRuntimeState = {
     appReady: false,
-    ipcConnected: false,
-    ipcInitialized: false,
+    transportConnected: true,
+    transportInitialized: true,
     codexAvailable: true,
-    lastError: null,
+    lastError: null
   };
 
   private bootstrapInFlight: Promise<void> | null = null;
-  private reconnectTimer: NodeJS.Timeout | null = null;
   private started = false;
 
   public constructor(options: CodexAgentOptions) {
     this.onStateChange = options.onStateChange ?? null;
-    this.reconnectDelayMs = options.reconnectDelayMs;
-    this.desktopIpcEnabled = !options.appServerUrl;
 
     this.appClient = new AppServerClient(
       options.appServerUrl
         ? new WebSocketAppServerTransport({
             url: options.appServerUrl,
-            userAgent: options.userAgent,
+            userAgent: options.userAgent
           })
         : new ChildProcessAppServerTransport({
             executablePath: options.appExecutable,
@@ -157,129 +142,31 @@ export class CodexAgentAdapter implements AgentAdapter {
             onStderr: (line) => {
               const normalized = normalizeStderrLine(line);
               logger.error({ line: normalized }, "codex-app-server-stderr");
-            },
-          }),
+            }
+          })
     );
 
-    this.ipcClient = new DesktopIpcClient({
-      socketPath: options.socketPath,
+    this.appClient.onServerRequest((request) => {
+      this.handleServerRequest(request);
     });
-    this.service = new CodexMonitorService(this.ipcClient);
-
-    if (!this.desktopIpcEnabled) {
-      this.patchRuntimeState({
-        ipcConnected: true,
-        ipcInitialized: true,
-      });
-      return;
-    }
-
-    this.ipcClient.onConnectionState((state) => {
-      this.patchRuntimeState({
-        ipcConnected: state.connected,
-        ipcInitialized: state.connected
-          ? this.runtimeState.ipcInitialized
-          : false,
-        ...(state.reason
-          ? { lastError: normalizeCodexRuntimeErrorMessage(state.reason) }
-          : {}),
-      });
-
-      if (!state.connected) {
-        this.scheduleIpcReconnect();
-      } else if (this.reconnectTimer) {
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = null;
-      }
-    });
-
-    this.ipcClient.onFrame((frame) => {
-      const threadId = extractThreadId(frame);
-      const method =
-        frame.type === "request" || frame.type === "broadcast"
-          ? frame.method
-          : frame.type === "response"
-            ? (frame.method ?? "response")
-            : frame.type;
-
-      const sourceClientIdRaw =
-        frame.type === "request" || frame.type === "broadcast"
-          ? frame.sourceClientId
-          : undefined;
-      const sourceClientId =
-        typeof sourceClientIdRaw === "string" ? sourceClientIdRaw.trim() : "";
-      if (sourceClientId) {
-        this.lastKnownOwnerClientId = sourceClientId;
-      }
-
-      this.emitIpcFrame({
-        direction: "in",
-        frame,
-        method,
-        threadId,
-      });
-
-      if (frame.type === "broadcast" && threadId) {
-        const current = this.streamEventsByThreadId.get(threadId) ?? [];
-        current.push(frame);
-        if (current.length > 400) {
-          current.splice(0, current.length - 400);
-        }
-        this.streamEventsByThreadId.set(threadId, current);
-      }
-
-      if (
-        frame.type !== "broadcast" ||
-        frame.method !== "thread-stream-state-changed"
-      ) {
-        return;
-      }
-
-      const params = frame.params;
-      if (!params || typeof params !== "object") {
-        return;
-      }
-
-      const conversationId = (params as Record<string, string>)[
-        "conversationId"
-      ];
-      if (!conversationId || !conversationId.trim()) {
-        return;
-      }
-
-      if (sourceClientId) {
-        this.threadOwnerById.set(conversationId, sourceClientId);
-      }
-
-      try {
-        const parsedBroadcast = parseThreadStreamStateChangedBroadcast(frame);
-        if (parsedBroadcast.params.change.type !== "snapshot") {
-          return;
-        }
-
-        const snapshot = parsedBroadcast.params.change.conversationState;
-        this.streamSnapshotByThreadId.set(conversationId, snapshot);
-        this.streamSnapshotOriginByThreadId.set(conversationId, "stream");
-        this.setThreadTitle(conversationId, snapshot.title);
-      } catch (error) {
-        logger.error(
-          {
-            conversationId,
-            error: toErrorMessage(error),
-            ...(error instanceof ProtocolValidationError
-              ? { issues: error.issues }
-              : {}),
-          },
-          "thread-stream-broadcast-parse-failed",
-        );
-      }
+    this.appClient.onSupportedServerNotification((notification) => {
+      this.handleSupportedServerNotification(notification);
     });
   }
 
-  public onIpcFrame(listener: (event: CodexIpcFrameEvent) => void): () => void {
-    this.ipcFrameListeners.add(listener);
+  public onAppEvent(listener: (event: CodexAppEvent) => void): () => void {
+    this.appEventListeners.add(listener);
     return () => {
-      this.ipcFrameListeners.delete(listener);
+      this.appEventListeners.delete(listener);
+    };
+  }
+
+  public onRealtimeThreadUpdate(
+    listener: (event: CodexThreadRealtimeEvent) => void
+  ): () => void {
+    this.realtimeThreadListeners.add(listener);
+    return () => {
+      this.realtimeThreadListeners.delete(listener);
     };
   }
 
@@ -299,14 +186,6 @@ export class CodexAgentAdapter implements AgentAdapter {
     return this.runtimeState.codexAvailable && this.runtimeState.appReady;
   }
 
-  public isIpcReady(): boolean {
-    return (
-      this.desktopIpcEnabled &&
-      this.runtimeState.ipcConnected &&
-      this.runtimeState.ipcInitialized
-    );
-  }
-
   public async start(): Promise<void> {
     this.started = true;
     await this.bootstrapConnections();
@@ -314,20 +193,11 @@ export class CodexAgentAdapter implements AgentAdapter {
 
   public async stop(): Promise<void> {
     this.started = false;
-
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    if (this.desktopIpcEnabled) {
-      await this.ipcClient.disconnect();
-    }
     await this.appClient.close();
   }
 
   public async listThreads(
-    input: AgentListThreadsInput,
+    input: AgentListThreadsInput
   ): Promise<AgentListThreadsResult> {
     this.ensureCodexAvailable();
 
@@ -339,26 +209,26 @@ export class CodexAgentAdapter implements AgentAdapter {
                   limit: input.limit,
                   archived: input.archived,
                   cursor: input.cursor,
-                  maxPages: input.maxPages,
+                  maxPages: input.maxPages
                 }
               : {
                   limit: input.limit,
                   archived: input.archived,
-                  maxPages: input.maxPages,
-                },
+                  maxPages: input.maxPages
+                }
           )
         : this.appClient.listThreads(
             input.cursor
               ? {
                   limit: input.limit,
                   archived: input.archived,
-                  cursor: input.cursor,
+                  cursor: input.cursor
                 }
               : {
                   limit: input.limit,
-                  archived: input.archived,
-                },
-          ),
+                  archived: input.archived
+                }
+          )
     );
 
     const data = result.data.map((thread) => {
@@ -375,9 +245,10 @@ export class CodexAgentAdapter implements AgentAdapter {
               : {}),
             ...(waitingState.waitingOnUserInput
               ? { waitingOnUserInput: true }
-              : {}),
+              : {})
           }
         : {};
+
       if (title === undefined) {
         if (
           isGenerating === undefined &&
@@ -385,10 +256,11 @@ export class CodexAgentAdapter implements AgentAdapter {
         ) {
           return thread;
         }
+
         return {
           ...thread,
           ...(isGenerating !== undefined ? { isGenerating } : {}),
-          ...waitingFlags,
+          ...waitingFlags
         };
       }
 
@@ -396,7 +268,7 @@ export class CodexAgentAdapter implements AgentAdapter {
         ...thread,
         title,
         ...(isGenerating !== undefined ? { isGenerating } : {}),
-        ...waitingFlags,
+        ...waitingFlags
       };
     });
 
@@ -406,12 +278,12 @@ export class CodexAgentAdapter implements AgentAdapter {
       ...(typeof result.pages === "number" ? { pages: result.pages } : {}),
       ...(typeof result.truncated === "boolean"
         ? { truncated: result.truncated }
-        : {}),
+        : {})
     };
   }
 
   public async createThread(
-    input: AgentCreateThreadInput,
+    input: AgentCreateThreadInput
   ): Promise<AgentCreateThreadResult> {
     this.ensureCodexAvailable();
 
@@ -429,9 +301,11 @@ export class CodexAgentAdapter implements AgentAdapter {
         sandbox: input.sandbox ?? "danger-full-access",
         approvalPolicy: input.approvalPolicy ?? "never",
         ...(input.serviceName ? { serviceName: input.serviceName } : {}),
-        ephemeral: input.ephemeral ?? false,
-      }),
+        ephemeral: input.ephemeral ?? false
+      })
     );
+
+    this.threadOwnerById.set(result.thread.id, APP_SERVER_OWNER_CLIENT_ID);
     this.setThreadTitle(result.thread.id, result.thread.title);
 
     return {
@@ -442,19 +316,19 @@ export class CodexAgentAdapter implements AgentAdapter {
       cwd: result.cwd,
       approvalPolicy: result.approvalPolicy,
       sandbox: result.sandbox,
-      reasoningEffort: result.reasoningEffort,
+      reasoningEffort: result.reasoningEffort
     };
   }
 
   public async readThread(
-    input: AgentReadThreadInput,
+    input: AgentReadThreadInput
   ): Promise<AgentReadThreadResult> {
     this.ensureCodexAvailable();
-    const readThreadWithOption = async (includeTurns: boolean) => {
-      return this.runAppServerCall(() =>
-        this.appClient.readThread(input.threadId, includeTurns),
+
+    const readThreadWithOption = async (includeTurns: boolean) =>
+      this.runAppServerCall(() =>
+        this.appClient.readThread(input.threadId, includeTurns)
       );
-    };
 
     let result: Awaited<ReturnType<typeof readThreadWithOption>>;
     try {
@@ -479,10 +353,10 @@ export class CodexAgentAdapter implements AgentAdapter {
         const shouldRetryWithoutTurns =
           input.includeTurns &&
           (isThreadNotMaterializedIncludeTurnsAppServerRpcError(
-            typedResumeRetryError,
+            typedResumeRetryError
           ) ||
             isThreadNoRolloutIncludeTurnsAppServerRpcError(
-              typedResumeRetryError,
+              typedResumeRetryError
             ));
         if (!shouldRetryWithoutTurns) {
           throw resumeRetryError;
@@ -490,6 +364,7 @@ export class CodexAgentAdapter implements AgentAdapter {
         result = await readThreadWithOption(false);
       }
     }
+
     const parsedThread = parseThreadConversationState(result.thread);
     const existingSnapshot = this.streamSnapshotByThreadId.get(input.threadId);
     const shouldStoreSnapshot =
@@ -497,16 +372,13 @@ export class CodexAgentAdapter implements AgentAdapter {
       parsedThread.turns.length > 0 ||
       existingSnapshot === undefined;
     if (shouldStoreSnapshot) {
-      this.streamSnapshotByThreadId.set(input.threadId, parsedThread);
-      const snapshotOrigin: StreamSnapshotOrigin =
-        input.includeTurns && parsedThread.turns.length > 0
-          ? "readThreadWithTurns"
-          : "readThread";
-      this.streamSnapshotOriginByThreadId.set(input.threadId, snapshotOrigin);
+      this.storeSnapshot(input.threadId, parsedThread);
+    } else {
+      this.setThreadTitle(input.threadId, parsedThread.title);
     }
-    this.setThreadTitle(input.threadId, parsedThread.title);
+
     return {
-      thread: parsedThread,
+      thread: parsedThread
     };
   }
 
@@ -516,55 +388,7 @@ export class CodexAgentAdapter implements AgentAdapter {
       throw new Error("Message input is required");
     }
 
-    const ownerClientId = (() => {
-      const mapped = this.threadOwnerById.get(input.threadId);
-      if (mapped && mapped.trim().length > 0) {
-        return mapped.trim();
-      }
-      if (input.ownerClientId && input.ownerClientId.trim().length > 0) {
-        return input.ownerClientId.trim();
-      }
-      if (this.lastKnownOwnerClientId && this.lastKnownOwnerClientId.trim()) {
-        return this.lastKnownOwnerClientId.trim();
-      }
-      return null;
-    })();
-
-    if (ownerClientId && this.isIpcReady()) {
-      this.threadOwnerById.set(input.threadId, ownerClientId);
-      try {
-        await this.service.sendMessage({
-          threadId: input.threadId,
-          ownerClientId,
-          parts: input.parts,
-          ...(input.cwd ? { cwd: input.cwd } : {}),
-          ...(typeof input.isSteering === "boolean"
-            ? { isSteering: input.isSteering }
-            : {}),
-        });
-        return;
-      } catch (error) {
-        const typedError = error instanceof Error ? error : null;
-        if (!isIpcNoClientFoundError(typedError)) {
-          throw error;
-        }
-        const mappedOwnerClientId = this.threadOwnerById.get(input.threadId);
-        if (mappedOwnerClientId === ownerClientId) {
-          this.threadOwnerById.delete(input.threadId);
-        }
-        if (this.lastKnownOwnerClientId === ownerClientId) {
-          this.lastKnownOwnerClientId = null;
-        }
-        logger.info(
-          {
-            threadId: input.threadId,
-            ownerClientId,
-            error: toErrorMessage(error),
-          },
-          "thread-owner-unreachable-send-via-app-server",
-        );
-      }
-    }
+    this.threadOwnerById.set(input.threadId, APP_SERVER_OWNER_CLIENT_ID);
 
     const sendTurn = async (): Promise<void> => {
       if (input.isSteering === true) {
@@ -576,7 +400,7 @@ export class CodexAgentAdapter implements AgentAdapter {
         await this.appClient.steerTurn({
           threadId: input.threadId,
           expectedTurnId: activeTurnId,
-          input: input.parts,
+          input: input.parts
         });
         return;
       }
@@ -585,9 +409,10 @@ export class CodexAgentAdapter implements AgentAdapter {
         threadId: input.threadId,
         input: input.parts,
         ...(input.cwd ? { cwd: input.cwd } : {}),
-        attachments: [],
+        attachments: []
       });
     };
+
     await this.runThreadOperationWithResumeRetry(input.threadId, sendTurn);
   }
 
@@ -601,6 +426,7 @@ export class CodexAgentAdapter implements AgentAdapter {
       }
       await this.appClient.interruptTurn(input.threadId, activeTurnId);
     };
+
     await this.runThreadOperationWithResumeRetry(input.threadId, interruptTurn);
   }
 
@@ -614,385 +440,425 @@ export class CodexAgentAdapter implements AgentAdapter {
     return this.runAppServerCall(() => this.appClient.listCollaborationModes());
   }
 
-  public async readRateLimits(): Promise<
-    import("@farfield/protocol").AppServerGetAccountRateLimitsResponse
-  > {
+  public async readRateLimits(): Promise<AppServerGetAccountRateLimitsResponse> {
     this.ensureCodexAvailable();
     try {
       const result = await this.appClient.readAccountRateLimits();
       this.patchRuntimeState({
         appReady: true,
-        lastError: null,
+        lastError: null
       });
       return result;
     } catch (error) {
       if (
         isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
-          error instanceof Error ? error : null,
+          error instanceof Error ? error : null
         )
       ) {
         this.patchRuntimeState({
           appReady: true,
-          lastError: null,
+          lastError: null
         });
         return {
           rateLimits: {},
-          rateLimitsByLimitId: null,
+          rateLimitsByLimitId: null
         };
       }
+
       this.patchRuntimeState({
         appReady: !(error instanceof AppServerTransportError),
-        lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error)),
+        lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error))
       });
       throw error;
     }
   }
 
-  public async setCollaborationMode(
-    input: AgentSetCollaborationModeInput,
-  ): Promise<{ ownerClientId: string }> {
-    this.ensureCodexAvailable();
-    this.ensureIpcReady();
-
-    const ownerClientId = resolveOwnerClientId(
-      this.threadOwnerById,
-      input.threadId,
-      input.ownerClientId,
-      this.lastKnownOwnerClientId ?? undefined,
-    );
-
-    await this.service.setCollaborationMode({
-      threadId: input.threadId,
-      ownerClientId,
-      collaborationMode: input.collaborationMode,
-    });
-
-    return {
-      ownerClientId,
-    };
-  }
-
   public async submitUserInput(
-    input: AgentSubmitUserInputInput,
+    input: AgentSubmitUserInputInput
   ): Promise<{ ownerClientId: string; requestId: UserInputRequestId }> {
     this.ensureCodexAvailable();
+
     const parsedResponse = parseUserInputResponsePayload(input.response);
-    const ownerClientIdForResult = (() => {
-      const mapped = this.threadOwnerById.get(input.threadId);
-      if (mapped && mapped.trim().length > 0) {
-        return mapped.trim();
-      }
-      if (input.ownerClientId && input.ownerClientId.trim().length > 0) {
-        return input.ownerClientId.trim();
-      }
-      if (this.lastKnownOwnerClientId && this.lastKnownOwnerClientId.trim()) {
-        return this.lastKnownOwnerClientId.trim();
-      }
-      return "app-server";
-    })();
+    const ownerClientId =
+      this.threadOwnerById.get(input.threadId) ?? APP_SERVER_OWNER_CLIENT_ID;
+    this.threadOwnerById.set(input.threadId, ownerClientId);
 
     const threadForRouting = await this.runThreadOperationWithResumeRetry(
       input.threadId,
-      () => this.appClient.readThread(input.threadId, false),
+      () => this.appClient.readThread(input.threadId, false)
     );
-    const parsedRoutingThread = parseThreadConversationState(threadForRouting.thread);
+    const parsedRoutingThread = parseThreadConversationState(
+      threadForRouting.thread
+    );
     const routingPendingRequest = findPendingRequestWithId(
       parsedRoutingThread,
-      input.requestId,
+      input.requestId
     );
-
-    if (routingPendingRequest) {
-      await this.runAppServerCall(() =>
-        this.appClient.submitUserInput(input.requestId, parsedResponse),
+    if (!routingPendingRequest) {
+      throw new Error(
+        `Unable to find pending request ${String(input.requestId)} for thread ${input.threadId}`
       );
-
-      const refreshedThread = await this.runThreadOperationWithResumeRetry(
-        input.threadId,
-        () => this.appClient.readThread(input.threadId, true),
-      );
-      const parsedThread = parseThreadConversationState(refreshedThread.thread);
-      this.streamSnapshotByThreadId.set(input.threadId, parsedThread);
-      this.streamSnapshotOriginByThreadId.set(input.threadId, "readThreadWithTurns");
-      this.setThreadTitle(input.threadId, parsedThread.title);
-
-      const currentEvents = this.streamEventsByThreadId.get(input.threadId) ?? [];
-      currentEvents.push(
-        buildSyntheticSnapshotEvent(input.threadId, ownerClientIdForResult, parsedThread),
-      );
-      if (currentEvents.length > 400) {
-        currentEvents.splice(0, currentEvents.length - 400);
-      }
-      this.streamEventsByThreadId.set(input.threadId, currentEvents);
-
-      return {
-        ownerClientId: ownerClientIdForResult,
-        requestId: input.requestId,
-      };
     }
 
-    this.ensureIpcReady();
-    const ownerClientId = resolveOwnerClientId(
-      this.threadOwnerById,
-      input.threadId,
-      input.ownerClientId,
-      this.lastKnownOwnerClientId ?? undefined,
-    );
-    this.threadOwnerById.set(input.threadId, ownerClientId);
-
-    const pendingIpcRequest = await this.resolvePendingIpcRequest(
-      input.threadId,
-      input.requestId,
-    );
-    switch (pendingIpcRequest.method) {
-      case "item/commandExecution/requestApproval": {
-        const commandResponse =
-          parseCommandExecutionRequestApprovalResponse(parsedResponse);
-        await this.service.submitCommandApprovalDecision({
-          threadId: input.threadId,
-          ownerClientId,
-          requestId: input.requestId,
-          response: commandResponse,
-        });
+    switch (routingPendingRequest.method) {
+      case "item/commandExecution/requestApproval":
+        parseCommandExecutionRequestApprovalResponse(parsedResponse);
         break;
-      }
-      case "item/fileChange/requestApproval": {
-        const fileResponse = parseFileChangeRequestApprovalResponse(
-          parsedResponse,
-        );
-        await this.service.submitFileApprovalDecision({
-          threadId: input.threadId,
-          ownerClientId,
-          requestId: input.requestId,
-          response: fileResponse,
-        });
+      case "item/fileChange/requestApproval":
+        parseFileChangeRequestApprovalResponse(parsedResponse);
         break;
-      }
-      case "item/tool/requestUserInput": {
-        const toolResponse = parseToolRequestUserInputResponsePayload(
-          parsedResponse,
-        );
-        await this.service.submitUserInput({
-          threadId: input.threadId,
-          ownerClientId,
-          requestId: input.requestId,
-          response: toolResponse,
-        });
+      case "item/tool/requestUserInput":
+        parseToolRequestUserInputResponsePayload(parsedResponse);
         break;
-      }
       case "execCommandApproval":
       case "applyPatchApproval":
-        throw new Error(
-          `Legacy approval request method ${pendingIpcRequest.method} is not supported over desktop IPC for thread ${input.threadId}`,
-        );
       case "account/chatgptAuthTokens/refresh":
       case "item/tool/call":
       case "item/plan/requestImplementation":
         throw new Error(
-          `Unsupported pending request method ${pendingIpcRequest.method} for submitUserInput on thread ${input.threadId}`,
+          `Unsupported pending request method ${routingPendingRequest.method} for submitUserInput on thread ${input.threadId}`
         );
+    }
+
+    await this.runAppServerCall(() =>
+      this.appClient.submitUserInput(input.requestId, parsedResponse)
+    );
+
+    const currentSnapshot = this.streamSnapshotByThreadId.get(input.threadId);
+    if (currentSnapshot) {
+      const updatedRequests = currentSnapshot.requests.map((request) =>
+        requestIdsMatch(request.id, input.requestId)
+          ? {
+              ...request,
+              completed: true
+            }
+          : request
+      );
+      this.storeSnapshot(input.threadId, {
+        ...currentSnapshot,
+        requests: updatedRequests
+      });
     }
 
     return {
       ownerClientId,
-      requestId: input.requestId,
+      requestId: input.requestId
     };
   }
 
   public async readLiveState(threadId: string): Promise<AgentThreadLiveState> {
-    const snapshotState = this.streamSnapshotByThreadId.get(threadId) ?? null;
-    const snapshotOrigin =
-      this.streamSnapshotOriginByThreadId.get(threadId) ?? null;
-    const ownerClientId =
-      this.threadOwnerById.get(threadId) ?? this.lastKnownOwnerClientId ?? null;
-    const rawEvents = this.streamEventsByThreadId.get(threadId) ?? [];
-    if (rawEvents.length === 0) {
-      return {
-        ownerClientId,
-        conversationState: snapshotState,
-        liveStateError: null,
-      };
-    }
-
-    const events: ReturnType<typeof parseThreadStreamStateChangedBroadcast>[] =
-      [];
-
-    for (let eventIndex = 0; eventIndex < rawEvents.length; eventIndex += 1) {
-      const event = rawEvents[eventIndex];
-      try {
-        events.push(parseThreadStreamStateChangedBroadcast(event));
-      } catch (error) {
-        logger.error(
-          {
-            threadId,
-            eventIndex,
-            error: toErrorMessage(error),
-            ...(error instanceof ProtocolValidationError
-              ? { issues: error.issues }
-              : {}),
-          },
-          "thread-stream-event-parse-failed",
-        );
-        return {
-          ownerClientId,
-          conversationState: snapshotState,
-          liveStateError: {
-            kind: "parseFailed",
-            message: toErrorMessage(error),
-            eventIndex,
-            patchIndex: null,
-          },
-        };
-      }
-    }
-
-    if (events.length === 0) {
-      return {
-        ownerClientId,
-        conversationState: snapshotState,
-        liveStateError: null,
-      };
-    }
-
-    const reductionWindow = trimThreadStreamEventsForReduction(events);
-    const reductionEvents = reductionWindow.events;
-    const canUseSyntheticSnapshot =
-      !reductionWindow.hasSnapshot &&
-      snapshotState !== null &&
-      snapshotOrigin === "stream";
-    const hasReliableReductionBase =
-      reductionWindow.hasSnapshot || canUseSyntheticSnapshot;
-
-    if (!hasReliableReductionBase) {
-      return {
-        ownerClientId,
-        conversationState: snapshotState,
-        liveStateError: null,
-      };
-    }
-
-    const reductionInput = canUseSyntheticSnapshot
-      ? [
-          buildSyntheticSnapshotEvent(
-            threadId,
-            ownerClientId ?? "farfield",
-            snapshotState,
-          ),
-          ...reductionEvents,
-        ]
-      : reductionEvents;
-    try {
-      const reduced = reduceThreadStreamEvents(reductionInput);
-      const state = reduced.get(threadId);
-      return {
-        ownerClientId: state?.ownerClientId ?? ownerClientId ?? null,
-        conversationState: state?.conversationState ?? snapshotState,
-        liveStateError: null,
-      };
-    } catch (error) {
-      const reductionErrorDetails =
-        error instanceof ThreadStreamReductionError ? error.details : null;
-      const eventIndex = reductionErrorDetails?.eventIndex ?? null;
-      const patchIndex = reductionErrorDetails?.patchIndex ?? null;
-      const message = toErrorMessage(error);
-
-      logger.warn(
-        {
-          threadId,
-          error: message,
-          eventIndex,
-          patchIndex,
-        },
-        "thread-stream-reduction-failed",
-      );
-
-      return {
-        ownerClientId,
-        conversationState: snapshotState,
-        liveStateError: {
-          kind: "reductionFailed",
-          message,
-          eventIndex,
-          patchIndex,
-        },
-      };
-    }
+    return {
+      ownerClientId:
+        this.threadOwnerById.get(threadId) ?? APP_SERVER_OWNER_CLIENT_ID,
+      conversationState: this.streamSnapshotByThreadId.get(threadId) ?? null,
+      liveStateError: null
+    };
   }
 
   public async readStreamEvents(
     threadId: string,
-    limit: number,
+    limit: number
   ): Promise<AgentThreadStreamEvents> {
     return {
       ownerClientId:
-        this.threadOwnerById.get(threadId) ??
-        this.lastKnownOwnerClientId ??
-        null,
-      events: (this.streamEventsByThreadId.get(threadId) ?? []).slice(-limit),
+        this.threadOwnerById.get(threadId) ?? APP_SERVER_OWNER_CLIENT_ID,
+      events: (this.streamEventsByThreadId.get(threadId) ?? []).slice(-limit)
     };
   }
 
-  public async replayRequest(
-    method: string,
-    params: IpcRequestFrame["params"],
-    options: SendRequestOptions = {},
-  ): Promise<IpcResponseFrame["result"]> {
-    this.ensureIpcReady();
-    const previewFrame: IpcFrame = {
-      type: "request",
-      requestId: "monitor-preview-request-id",
-      method,
-      params,
-      targetClientId: options.targetClientId,
-      version: options.version,
-    };
-    this.emitIpcFrame({
-      direction: "out",
-      frame: previewFrame,
-      method,
-      threadId: extractThreadId(previewFrame),
+  private handleServerRequest(request: AppServerServerRequest): void {
+    const threadId = readThreadIdFromRequest(request);
+    this.emitAppEvent({
+      direction: "in",
+      payload: request,
+      method: request.method,
+      threadId
     });
 
-    const response = await this.ipcClient.sendRequestAndWait(
-      method,
-      params,
-      options,
-    );
-    return response.result;
+    if (!threadId) {
+      return;
+    }
+
+    this.threadOwnerById.set(threadId, APP_SERVER_OWNER_CLIENT_ID);
+    const current = this.getThreadState(threadId);
+    const next = upsertThreadRequest(current, request);
+    this.storeSnapshot(threadId, next);
   }
 
-  public replayBroadcast(
-    method: string,
-    params: IpcRequestFrame["params"],
-    options: SendRequestOptions = {},
+  private handleSupportedServerNotification(
+    notification: AppServerSupportedServerNotification
   ): void {
-    this.ensureIpcReady();
-    const previewFrame: IpcFrame = {
-      type: "broadcast",
-      method,
-      params,
-      targetClientId: options.targetClientId,
-      version: options.version,
-    };
-    this.emitIpcFrame({
-      direction: "out",
-      frame: previewFrame,
-      method,
-      threadId: extractThreadId({
-        type: "request",
-        requestId: "monitor-preview-request-id",
-        method,
-        params,
-        targetClientId: options.targetClientId,
-        version: options.version,
-      }),
+    const threadId = readThreadIdFromNotification(notification);
+    this.emitAppEvent({
+      direction: "in",
+      payload: notification,
+      method: notification.method,
+      threadId
     });
 
-    this.ipcClient.sendBroadcast(method, params, options);
+    switch (notification.method) {
+      case "thread/started": {
+        const thread = parseThreadConversationState(notification.params.thread);
+        this.threadOwnerById.set(thread.id, APP_SERVER_OWNER_CLIENT_ID);
+        this.storeSnapshot(thread.id, thread);
+        return;
+      }
+
+      case "thread/name/updated": {
+        const current = this.getThreadState(notification.params.threadId);
+        this.storeSnapshot(notification.params.threadId, {
+          ...current,
+          title: notification.params.threadName ?? null
+        });
+        return;
+      }
+
+      case "thread/tokenUsage/updated": {
+        const current = this.getThreadState(notification.params.threadId);
+        this.storeSnapshot(notification.params.threadId, {
+          ...current,
+          latestTokenUsageInfo: notification.params.tokenUsage
+        });
+        return;
+      }
+
+      case "turn/started":
+      case "turn/completed": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = upsertTurn(current, notification.params.turn);
+        this.storeSnapshot(notification.params.threadId, next);
+        return;
+      }
+
+      case "turn/diff/updated": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = updateTurnById(
+          current,
+          notification.params.turnId,
+          (turn) => ({
+            ...turn,
+            diff: notification.params.diff
+          }),
+          () => ({
+            id: notification.params.turnId,
+            turnId: notification.params.turnId,
+            status: "inProgress",
+            items: [],
+            diff: notification.params.diff
+          })
+        );
+        this.storeSnapshot(notification.params.threadId, next);
+        return;
+      }
+
+      case "turn/plan/updated": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = updateTurnById(
+          current,
+          notification.params.turnId,
+          (turn) => upsertItemIntoTurn(turn, buildPlanSummaryItem(
+            turn,
+            notification.params.turnId,
+            notification.params.explanation ?? null,
+            notification.params.plan
+          )),
+          () => ({
+            id: notification.params.turnId,
+            turnId: notification.params.turnId,
+            status: "inProgress",
+            items: [
+              buildPlanSummaryItem(
+                null,
+                notification.params.turnId,
+                notification.params.explanation ?? null,
+                notification.params.plan
+              )
+            ]
+          })
+        );
+        this.storeSnapshot(notification.params.threadId, next);
+        return;
+      }
+
+      case "item/started":
+      case "item/completed": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = updateTurnById(
+          current,
+          notification.params.turnId,
+          (turn) => upsertItemIntoTurn(turn, notification.params.item),
+          () => ({
+            id: notification.params.turnId,
+            turnId: notification.params.turnId,
+            status: "inProgress",
+            items: [notification.params.item]
+          })
+        );
+        this.storeSnapshot(notification.params.threadId, next);
+        return;
+      }
+
+      case "item/agentMessage/delta": {
+        this.applyItemTextDelta(
+          notification.params.threadId,
+          notification.params.turnId,
+          notification.params.itemId,
+          "agentMessage",
+          notification.params.delta
+        );
+        return;
+      }
+
+      case "item/plan/delta": {
+        this.applyItemTextDelta(
+          notification.params.threadId,
+          notification.params.turnId,
+          notification.params.itemId,
+          "plan",
+          notification.params.delta
+        );
+        return;
+      }
+
+      case "item/commandExecution/outputDelta": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = updateTurnById(
+          current,
+          notification.params.turnId,
+          (turn) =>
+            updateCommandExecutionOutput(
+              turn,
+              notification.params.itemId,
+              notification.params.delta
+            ),
+          () => ({
+            id: notification.params.turnId,
+            turnId: notification.params.turnId,
+            status: "inProgress",
+            items: [
+              createEmptyCommandExecutionItem(notification.params.itemId)
+            ]
+          })
+        );
+        this.storeSnapshot(notification.params.threadId, next);
+        return;
+      }
+
+      case "item/fileChange/outputDelta": {
+        return;
+      }
+
+      case "item/reasoning/summaryPartAdded": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = updateTurnById(
+          current,
+          notification.params.turnId,
+          (turn) =>
+            ensureReasoningSummaryIndex(
+              turn,
+              notification.params.itemId,
+              notification.params.summaryIndex
+            ),
+          () => ({
+            id: notification.params.turnId,
+            turnId: notification.params.turnId,
+            status: "inProgress",
+            items: [createEmptyReasoningItem(notification.params.itemId)]
+          })
+        );
+        this.storeSnapshot(notification.params.threadId, next);
+        return;
+      }
+
+      case "item/reasoning/summaryTextDelta": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = updateTurnById(
+          current,
+          notification.params.turnId,
+          (turn) =>
+            appendReasoningSummaryDelta(
+              turn,
+              notification.params.itemId,
+              notification.params.summaryIndex,
+              notification.params.delta
+            ),
+          () => ({
+            id: notification.params.turnId,
+            turnId: notification.params.turnId,
+            status: "inProgress",
+            items: [createEmptyReasoningItem(notification.params.itemId)]
+          })
+        );
+        this.storeSnapshot(notification.params.threadId, next);
+        return;
+      }
+
+      case "item/reasoning/textDelta": {
+        const current = this.getThreadState(notification.params.threadId);
+        const next = updateTurnById(
+          current,
+          notification.params.turnId,
+          (turn) =>
+            appendReasoningTextDelta(
+              turn,
+              notification.params.itemId,
+              notification.params.delta
+            ),
+          () => ({
+            id: notification.params.turnId,
+            turnId: notification.params.turnId,
+            status: "inProgress",
+            items: [createEmptyReasoningItem(notification.params.itemId)]
+          })
+        );
+        this.storeSnapshot(notification.params.threadId, next);
+        return;
+      }
+
+      case "item/mcpToolCall/progress": {
+        return;
+      }
+    }
   }
 
-  private emitIpcFrame(event: CodexIpcFrameEvent): void {
-    for (const listener of this.ipcFrameListeners) {
+  private applyItemTextDelta(
+    threadId: string,
+    turnId: string,
+    itemId: string,
+    itemType: "agentMessage" | "plan",
+    delta: string
+  ): void {
+    const current = this.getThreadState(threadId);
+    const next = updateTurnById(
+      current,
+      turnId,
+      (turn) => appendTextDeltaToTurnItem(turn, itemId, itemType, delta),
+      () => ({
+        id: turnId,
+        turnId,
+        status: "inProgress",
+        items: [
+          itemType === "agentMessage"
+            ? createEmptyAgentMessageItem(itemId)
+            : createEmptyPlanItem(itemId)
+        ]
+      })
+    );
+    this.storeSnapshot(threadId, next);
+  }
+
+  private emitAppEvent(event: CodexAppEvent): void {
+    for (const listener of this.appEventListeners) {
       listener(event);
+    }
+  }
+
+  private emitRealtimeThreadUpdate(threadId: string, thread: ThreadConversationState): void {
+    for (const listener of this.realtimeThreadListeners) {
+      listener({
+        threadId,
+        thread
+      });
     }
   }
 
@@ -1005,8 +871,8 @@ export class CodexAgentAdapter implements AgentAdapter {
   private setRuntimeState(next: CodexAgentRuntimeState): void {
     const isSameState =
       this.runtimeState.appReady === next.appReady &&
-      this.runtimeState.ipcConnected === next.ipcConnected &&
-      this.runtimeState.ipcInitialized === next.ipcInitialized &&
+      this.runtimeState.transportConnected === next.transportConnected &&
+      this.runtimeState.transportInitialized === next.transportInitialized &&
       this.runtimeState.codexAvailable === next.codexAvailable &&
       this.runtimeState.lastError === next.lastError;
 
@@ -1021,7 +887,7 @@ export class CodexAgentAdapter implements AgentAdapter {
   private patchRuntimeState(patch: Partial<CodexAgentRuntimeState>): void {
     this.setRuntimeState({
       ...this.runtimeState,
-      ...patch,
+      ...patch
     });
   }
 
@@ -1031,46 +897,18 @@ export class CodexAgentAdapter implements AgentAdapter {
     }
   }
 
-  private ensureIpcReady(): void {
-    if (!this.desktopIpcEnabled) {
-      throw new Error(
-        "Desktop IPC is unavailable for remote Codex app-server connections",
-      );
-    }
-    if (!this.isIpcReady()) {
-      throw new Error(
-        this.runtimeState.lastError ?? "Desktop IPC is not connected",
-      );
-    }
-  }
-
-  private scheduleIpcReconnect(): void {
-    if (
-      this.reconnectTimer ||
-      !this.runtimeState.codexAvailable ||
-      !this.started
-    ) {
-      return;
-    }
-
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      void this.bootstrapConnections();
-    }, this.reconnectDelayMs);
-  }
-
   private async runAppServerCall<T>(operation: () => Promise<T>): Promise<T> {
     try {
       const result = await operation();
       this.patchRuntimeState({
         appReady: true,
-        lastError: null,
+        lastError: null
       });
       return result;
     } catch (error) {
       this.patchRuntimeState({
         appReady: !(error instanceof AppServerTransportError),
-        lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error)),
+        lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error))
       });
       throw error;
     }
@@ -1084,7 +922,7 @@ export class CodexAgentAdapter implements AgentAdapter {
     this.bootstrapInFlight = (async () => {
       try {
         await this.runAppServerCall(() =>
-          this.appClient.listThreads({ limit: 1, archived: false }),
+          this.appClient.listThreads({ limit: 1, archived: false })
         );
       } catch (error) {
         const message = toErrorMessage(error);
@@ -1093,50 +931,15 @@ export class CodexAgentAdapter implements AgentAdapter {
           message.includes("not found") ||
           (error instanceof Error &&
             "code" in error &&
-            (error as NodeJS.ErrnoException).code === "ENOENT");
+            error.code === "ENOENT");
 
         if (isSpawnError) {
           this.patchRuntimeState({
             codexAvailable: false,
-            lastError: normalizeCodexRuntimeErrorMessage(message),
+            lastError: normalizeCodexRuntimeErrorMessage(message)
           });
           logger.warn({ error: message }, "codex-not-found");
         }
-      }
-
-      if (!this.runtimeState.codexAvailable) {
-        this.bootstrapInFlight = null;
-        return;
-      }
-
-      if (!this.desktopIpcEnabled) {
-        this.patchRuntimeState({
-          ipcConnected: true,
-          ipcInitialized: true,
-        });
-        this.bootstrapInFlight = null;
-        return;
-      }
-
-      try {
-        if (!this.ipcClient.isConnected()) {
-          await this.ipcClient.connect();
-        }
-        this.patchRuntimeState({
-          ipcConnected: true,
-        });
-
-        await this.ipcClient.initialize(this.label);
-        this.patchRuntimeState({
-          ipcInitialized: true,
-        });
-      } catch (error) {
-        this.patchRuntimeState({
-          ipcInitialized: false,
-          ipcConnected: this.ipcClient.isConnected(),
-          lastError: normalizeCodexRuntimeErrorMessage(toErrorMessage(error)),
-        });
-        this.scheduleIpcReconnect();
       } finally {
         this.bootstrapInFlight = null;
       }
@@ -1147,7 +950,7 @@ export class CodexAgentAdapter implements AgentAdapter {
 
   private async getActiveTurnId(threadId: string): Promise<string | null> {
     const readResult = await this.runAppServerCall(() =>
-      this.appClient.readThread(threadId, true),
+      this.appClient.readThread(threadId, true)
     );
     const turns = readResult.thread.turns;
 
@@ -1168,12 +971,9 @@ export class CodexAgentAdapter implements AgentAdapter {
         continue;
       }
 
-      if (turn.turnId && turn.turnId.trim().length > 0) {
-        return turn.turnId.trim();
-      }
-
-      if (turn.id && turn.id.trim().length > 0) {
-        return turn.id.trim();
+      const turnId = getTurnIdentifier(turn);
+      if (turnId) {
+        return turnId;
       }
     }
 
@@ -1183,8 +983,8 @@ export class CodexAgentAdapter implements AgentAdapter {
   private async resumeThread(threadId: string): Promise<void> {
     await this.runAppServerCall(() =>
       this.appClient.resumeThread(threadId, {
-        persistExtendedHistory: true,
-      }),
+        persistExtendedHistory: true
+      })
     );
   }
 
@@ -1195,8 +995,8 @@ export class CodexAgentAdapter implements AgentAdapter {
       const response = await this.runAppServerCall(() =>
         this.appClient.listLoadedThreads({
           limit: 200,
-          ...(cursor ? { cursor } : {}),
-        }),
+          ...(cursor ? { cursor } : {})
+        })
       );
       if (response.data.some((loadedThreadId) => loadedThreadId === threadId)) {
         return true;
@@ -1220,7 +1020,7 @@ export class CodexAgentAdapter implements AgentAdapter {
 
   private async runThreadOperationWithResumeRetry<T>(
     threadId: string,
-    operation: () => Promise<T>,
+    operation: () => Promise<T>
   ): Promise<T> {
     await this.ensureThreadLoaded(threadId);
 
@@ -1242,37 +1042,34 @@ export class CodexAgentAdapter implements AgentAdapter {
     return this.runAppServerCall(operation);
   }
 
-  private async resolvePendingIpcRequest(
-    threadId: string,
-    requestId: UserInputRequestId,
-  ): Promise<ThreadConversationRequest> {
-    const cachedSnapshot = this.streamSnapshotByThreadId.get(threadId);
-    if (cachedSnapshot) {
-      const pending = findPendingRequestWithId(cachedSnapshot, requestId);
-      if (pending) {
-        return pending;
+  private getThreadState(threadId: string): ThreadConversationState {
+    return (
+      this.streamSnapshotByThreadId.get(threadId) ?? {
+        id: threadId,
+        turns: [],
+        requests: []
       }
-    }
-
-    const liveState = await this.readLiveState(threadId);
-    if (liveState.conversationState) {
-      const pending = findPendingRequestWithId(
-        liveState.conversationState,
-        requestId,
-      );
-      if (pending) {
-        return pending;
-      }
-    }
-
-    throw new Error(
-      `Unable to find pending request ${String(requestId)} in live state for thread ${threadId}`,
     );
+  }
+
+  private storeSnapshot(
+    threadId: string,
+    thread: ThreadConversationState
+  ): void {
+    this.streamSnapshotByThreadId.set(threadId, thread);
+    this.setThreadTitle(threadId, thread.title);
+    this.threadOwnerById.set(threadId, APP_SERVER_OWNER_CLIENT_ID);
+    appendSyntheticSnapshotEvent(
+      this.streamEventsByThreadId,
+      threadId,
+      thread
+    );
+    this.emitRealtimeThreadUpdate(threadId, thread);
   }
 
   private resolveThreadTitle(
     threadId: string,
-    directTitle: string | null | undefined,
+    directTitle: string | null | undefined
   ): string | null | undefined {
     if (directTitle !== undefined) {
       return directTitle;
@@ -1292,7 +1089,7 @@ export class CodexAgentAdapter implements AgentAdapter {
 
   private setThreadTitle(
     threadId: string,
-    title: string | null | undefined,
+    title: string | null | undefined
   ): void {
     if (title === undefined) {
       this.threadTitleById.delete(threadId);
@@ -1305,12 +1102,7 @@ export class CodexAgentAdapter implements AgentAdapter {
     }
 
     const normalized = title.trim();
-    if (normalized.length === 0) {
-      this.threadTitleById.set(threadId, null);
-      return;
-    }
-
-    this.threadTitleById.set(threadId, title);
+    this.threadTitleById.set(threadId, normalized.length > 0 ? title : null);
   }
 }
 
@@ -1327,7 +1119,7 @@ function toErrorMessage(error: Error | string | unknown): string {
 const INVALID_REQUEST_ERROR_CODE = -32600;
 
 export function isInvalidRequestAppServerRpcError(
-  error: Error | null,
+  error: Error | null
 ): boolean {
   if (!(error instanceof AppServerRpcError)) {
     return false;
@@ -1336,12 +1128,9 @@ export function isInvalidRequestAppServerRpcError(
 }
 
 export function isThreadNotMaterializedIncludeTurnsAppServerRpcError(
-  error: Error | null,
+  error: Error | null
 ): boolean {
-  if (!isInvalidRequestAppServerRpcError(error)) {
-    return false;
-  }
-  if (!error) {
+  if (!isInvalidRequestAppServerRpcError(error) || !error) {
     return false;
   }
   const normalized = error.message.trim().toLowerCase();
@@ -1352,25 +1141,18 @@ export function isThreadNotMaterializedIncludeTurnsAppServerRpcError(
 }
 
 export function isThreadNotLoadedAppServerRpcError(
-  error: Error | null,
+  error: Error | null
 ): boolean {
-  if (!isInvalidRequestAppServerRpcError(error)) {
+  if (!isInvalidRequestAppServerRpcError(error) || !error) {
     return false;
   }
-  if (!error) {
-    return false;
-  }
-  const normalized = error.message.trim().toLowerCase();
-  return normalized.includes("thread not loaded");
+  return error.message.trim().toLowerCase().includes("thread not loaded");
 }
 
 export function isThreadNoRolloutIncludeTurnsAppServerRpcError(
-  error: Error | null,
+  error: Error | null
 ): boolean {
-  if (!isInvalidRequestAppServerRpcError(error)) {
-    return false;
-  }
-  if (!error) {
+  if (!isInvalidRequestAppServerRpcError(error) || !error) {
     return false;
   }
   const normalized = error.message.trim().toLowerCase();
@@ -1381,12 +1163,9 @@ export function isThreadNoRolloutIncludeTurnsAppServerRpcError(
 }
 
 export function isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
-  error: Error | null,
+  error: Error | null
 ): boolean {
-  if (!isInvalidRequestAppServerRpcError(error)) {
-    return false;
-  }
-  if (!error) {
+  if (!isInvalidRequestAppServerRpcError(error) || !error) {
     return false;
   }
   const normalized = error.message.trim().toLowerCase();
@@ -1394,14 +1173,6 @@ export function isAuthenticationRequiredToReadRateLimitsAppServerRpcError(
     normalized.includes("authentication required") &&
     normalized.includes("read rate limits")
   );
-}
-
-export function isIpcNoClientFoundError(error: Error | null): boolean {
-  if (!(error instanceof DesktopIpcError)) {
-    return false;
-  }
-  const normalized = error.message.trim().toLowerCase();
-  return normalized.includes("no-client-found");
 }
 
 function normalizeStderrLine(line: string): string {
@@ -1434,7 +1205,7 @@ function isThreadStateGenerating(state: ThreadConversationState): boolean {
 }
 
 function deriveThreadWaitingState(
-  state: ThreadConversationState,
+  state: ThreadConversationState
 ): {
   waitingOnApproval: boolean;
   waitingOnUserInput: boolean;
@@ -1466,20 +1237,17 @@ function deriveThreadWaitingState(
 
   return {
     waitingOnApproval,
-    waitingOnUserInput,
+    waitingOnUserInput
   };
 }
 
-function requestIdsMatch(
-  left: UserInputRequestId,
-  right: UserInputRequestId,
-): boolean {
+function requestIdsMatch(left: UserInputRequestId, right: UserInputRequestId): boolean {
   return `${left}` === `${right}`;
 }
 
 function findPendingRequestWithId(
   state: ThreadConversationState,
-  requestId: UserInputRequestId,
+  requestId: UserInputRequestId
 ): ThreadConversationRequest | null {
   for (const request of state.requests) {
     if (request.completed === true) {
@@ -1492,74 +1260,539 @@ function findPendingRequestWithId(
   return null;
 }
 
+function appendSyntheticSnapshotEvent(
+  store: Map<string, ClientEventEnvelope[]>,
+  threadId: string,
+  conversationState: ThreadConversationState
+): void {
+  const events = store.get(threadId) ?? [];
+  events.push(buildSyntheticSnapshotEvent(threadId, conversationState));
+  if (events.length > MAX_STREAM_EVENTS) {
+    events.splice(0, events.length - MAX_STREAM_EVENTS);
+  }
+  store.set(threadId, events);
+}
+
 function buildSyntheticSnapshotEvent(
   threadId: string,
-  sourceClientId: string,
-  conversationState: ThreadConversationState,
-): ThreadStreamStateChangedBroadcast {
+  conversationState: ThreadConversationState
+): ClientEventEnvelope {
   return {
     type: "broadcast",
     method: "thread-stream-state-changed",
-    sourceClientId,
+    sourceClientId: APP_SERVER_OWNER_CLIENT_ID,
     version: 0,
     params: {
       conversationId: threadId,
       change: {
         type: "snapshot",
-        conversationState,
+        conversationState
       },
       version: 0,
-      type: "thread-stream-state-changed",
-    },
+      type: "thread-stream-state-changed"
+    }
   };
 }
 
-function trimThreadStreamEventsForReduction(
-  events: ThreadStreamStateChangedBroadcast[],
-): { events: ThreadStreamStateChangedBroadcast[]; hasSnapshot: boolean } {
-  let latestSnapshotIndex = -1;
-  for (let index = 0; index < events.length; index += 1) {
-    const event = events[index];
-    if (event?.params.change.type === "snapshot") {
-      latestSnapshotIndex = index;
+function readThreadIdFromRequest(request: AppServerServerRequest): string | null {
+  switch (request.method) {
+    case "item/commandExecution/requestApproval":
+    case "item/fileChange/requestApproval":
+    case "item/tool/requestUserInput":
+    case "item/tool/call":
+      return request.params.threadId;
+    case "account/chatgptAuthTokens/refresh":
+    case "execCommandApproval":
+    case "applyPatchApproval":
+    case "item/plan/requestImplementation":
+      return null;
+  }
+  return null;
+}
+
+function readThreadIdFromNotification(
+  notification: AppServerSupportedServerNotification
+): string | null {
+  switch (notification.method) {
+    case "thread/started":
+      return notification.params.thread.id;
+    case "thread/name/updated":
+    case "thread/tokenUsage/updated":
+    case "turn/started":
+    case "turn/completed":
+    case "turn/diff/updated":
+    case "turn/plan/updated":
+    case "item/started":
+    case "item/completed":
+    case "item/agentMessage/delta":
+    case "item/commandExecution/outputDelta":
+    case "item/fileChange/outputDelta":
+    case "item/plan/delta":
+    case "item/reasoning/summaryPartAdded":
+    case "item/reasoning/summaryTextDelta":
+    case "item/reasoning/textDelta":
+    case "item/mcpToolCall/progress":
+      return notification.params.threadId;
+  }
+  return null;
+}
+
+function getTurnIdentifier(turn: ThreadTurn): string | null {
+  if (turn.turnId && turn.turnId.trim().length > 0) {
+    return turn.turnId.trim();
+  }
+  if (turn.id && turn.id.trim().length > 0) {
+    return turn.id.trim();
+  }
+  return null;
+}
+
+function findTurnIndex(turns: ThreadTurn[], turnId: string): number {
+  for (let index = 0; index < turns.length; index += 1) {
+    const turn = turns[index];
+    if (!turn) {
+      continue;
+    }
+    if (getTurnIdentifier(turn) === turnId) {
+      return index;
     }
   }
+  return -1;
+}
 
-  if (latestSnapshotIndex === -1) {
-    return {
-      events,
-      hasSnapshot: false,
-    };
+function upsertTurn(state: ThreadConversationState, incoming: ThreadTurn): ThreadConversationState {
+  const turnId = getTurnIdentifier(incoming);
+  if (!turnId) {
+    return state;
+  }
+
+  const turns = [...state.turns];
+  const existingIndex = findTurnIndex(turns, turnId);
+  if (existingIndex === -1) {
+    turns.push(incoming);
+  } else {
+    const existing = turns[existingIndex];
+    turns[existingIndex] = existing
+      ? mergeTurns(existing, incoming)
+      : incoming;
   }
 
   return {
-    events: events.slice(latestSnapshotIndex),
-    hasSnapshot: true,
+    ...state,
+    turns
   };
 }
 
-function extractThreadId(frame: IpcFrame): string | null {
-  if (frame.type !== "request" && frame.type !== "broadcast") {
-    return null;
+function mergeTurns(existing: ThreadTurn, incoming: ThreadTurn): ThreadTurn {
+  return {
+    ...existing,
+    ...incoming,
+    params: incoming.params ?? existing.params,
+    turnStartedAtMs: incoming.turnStartedAtMs ?? existing.turnStartedAtMs,
+    finalAssistantStartedAtMs:
+      incoming.finalAssistantStartedAtMs ?? existing.finalAssistantStartedAtMs,
+    error: incoming.error ?? existing.error,
+    diff: incoming.diff ?? existing.diff,
+    items: incoming.items.length > 0 ? incoming.items : existing.items
+  };
+}
+
+function updateTurnById(
+  state: ThreadConversationState,
+  turnId: string,
+  updater: (turn: ThreadTurn) => ThreadTurn,
+  createTurn: () => ThreadTurn
+): ThreadConversationState {
+  const turns = [...state.turns];
+  const existingIndex = findTurnIndex(turns, turnId);
+  if (existingIndex === -1) {
+    turns.push(updater(createTurn()));
+  } else {
+    const existing = turns[existingIndex];
+    turns[existingIndex] = existing ? updater(existing) : updater(createTurn());
   }
 
-  const params = frame.params;
-  if (!params || typeof params !== "object") {
-    return null;
+  return {
+    ...state,
+    turns
+  };
+}
+
+function upsertItemIntoTurn(turn: ThreadTurn, item: ThreadItem): ThreadTurn {
+  const items = [...turn.items];
+  const itemIndex = items.findIndex((existingItem) => existingItem.id === item.id);
+  if (itemIndex === -1) {
+    items.push(item);
+  } else {
+    const existingItem = items[itemIndex];
+    items[itemIndex] = existingItem ? mergeItems(existingItem, item) : item;
   }
 
-  const asRecord = params as Record<string, string>;
-  const candidates = [
-    asRecord["conversationId"],
-    asRecord["threadId"],
-    asRecord["turnId"],
-  ];
+  return {
+    ...turn,
+    items
+  };
+}
 
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim();
+function mergeItems(existing: ThreadItem, incoming: ThreadItem): ThreadItem {
+  if (existing.type !== incoming.type) {
+    return incoming;
+  }
+
+  if (
+    incoming.type === "agentMessage" &&
+    isAgentMessageItem(existing)
+  ) {
+    return mergeAgentMessageItems(existing, incoming);
+  }
+  if (incoming.type === "plan" && isPlanItem(existing)) {
+    return mergePlanItems(existing, incoming);
+  }
+  if (incoming.type === "reasoning" && isReasoningItem(existing)) {
+    return mergeReasoningItems(existing, incoming);
+  }
+  if (
+    incoming.type === "commandExecution" &&
+    isCommandExecutionItem(existing)
+  ) {
+    return mergeCommandExecutionItems(existing, incoming);
+  }
+
+  return incoming;
+}
+
+function mergeAgentMessageItems(
+  existing: AgentMessageItem,
+  incoming: AgentMessageItem
+): AgentMessageItem {
+  return {
+    ...incoming,
+    text: incoming.text.length > 0 ? incoming.text : existing.text
+  };
+}
+
+function mergePlanItems(existing: PlanItem, incoming: PlanItem): PlanItem {
+  return {
+    ...incoming,
+    text: incoming.text.length > 0 ? incoming.text : existing.text
+  };
+}
+
+function mergeReasoningItems(
+  existing: ReasoningItem,
+  incoming: ReasoningItem
+): ReasoningItem {
+  return {
+    ...incoming,
+    summary:
+      incoming.summary !== undefined && incoming.summary.length > 0
+        ? incoming.summary
+        : existing.summary,
+    text:
+      incoming.text !== undefined && incoming.text.length > 0
+        ? incoming.text
+        : existing.text,
+    content:
+      incoming.content !== undefined && incoming.content.length > 0
+        ? incoming.content
+        : existing.content
+  };
+}
+
+function mergeCommandExecutionItems(
+  existing: CommandExecutionItem,
+  incoming: CommandExecutionItem
+): CommandExecutionItem {
+  return {
+    ...existing,
+    ...incoming,
+    aggregatedOutput:
+      incoming.aggregatedOutput !== undefined &&
+      incoming.aggregatedOutput !== null &&
+      incoming.aggregatedOutput.length > 0
+        ? incoming.aggregatedOutput
+        : existing.aggregatedOutput
+  };
+}
+
+function appendTextDeltaToTurnItem(
+  turn: ThreadTurn,
+  itemId: string,
+  itemType: "agentMessage" | "plan",
+  delta: string
+): ThreadTurn {
+  const items = [...turn.items];
+  const itemIndex = items.findIndex((item) => item.id === itemId);
+  const existingItem = items[itemIndex];
+
+  let nextItem: ThreadItem;
+  if (itemType === "agentMessage") {
+    const baseItem = ensureAgentMessageItem(existingItem, itemId);
+    if (!baseItem) {
+      return turn;
     }
+    const nextAgentMessageItem: AgentMessageItem = {
+      ...baseItem,
+      text: baseItem.text + delta
+    };
+    nextItem = nextAgentMessageItem;
+  } else {
+    const baseItem = ensurePlanItem(existingItem, itemId);
+    if (!baseItem) {
+      return turn;
+    }
+    const nextPlanItem: PlanItem = {
+      ...baseItem,
+      text: baseItem.text + delta
+    };
+    nextItem = nextPlanItem;
   }
 
-  return null;
+  if (itemIndex === -1) {
+    items.push(nextItem);
+  } else {
+    items[itemIndex] = nextItem;
+  }
+
+  return {
+    ...turn,
+    items
+  };
+}
+
+function updateCommandExecutionOutput(
+  turn: ThreadTurn,
+  itemId: string,
+  delta: string
+): ThreadTurn {
+  const items = [...turn.items];
+  const itemIndex = items.findIndex((item) => item.id === itemId);
+  const existingItem = items[itemIndex];
+  const baseItem = ensureCommandExecutionItem(existingItem, itemId);
+  if (!baseItem) {
+    return turn;
+  }
+
+  const existingOutput = baseItem.aggregatedOutput ?? "";
+  const nextItem: CommandExecutionItem = {
+    ...baseItem,
+    aggregatedOutput: existingOutput + delta
+  };
+  if (itemIndex === -1) {
+    items.push(nextItem);
+  } else {
+    items[itemIndex] = nextItem;
+  }
+
+  return {
+    ...turn,
+    items
+  };
+}
+
+function ensureReasoningSummaryIndex(
+  turn: ThreadTurn,
+  itemId: string,
+  summaryIndex: number
+): ThreadTurn {
+  return updateReasoningItem(turn, itemId, (item) => {
+    const summary = [...(item.summary ?? [])];
+    while (summary.length <= summaryIndex) {
+      summary.push("");
+    }
+    return {
+      ...item,
+      summary
+    };
+  });
+}
+
+function appendReasoningSummaryDelta(
+  turn: ThreadTurn,
+  itemId: string,
+  summaryIndex: number,
+  delta: string
+): ThreadTurn {
+  return updateReasoningItem(turn, itemId, (item) => {
+    const summary = [...(item.summary ?? [])];
+    while (summary.length <= summaryIndex) {
+      summary.push("");
+    }
+    summary[summaryIndex] = (summary[summaryIndex] ?? "") + delta;
+    return {
+      ...item,
+      summary
+    };
+  });
+}
+
+function appendReasoningTextDelta(
+  turn: ThreadTurn,
+  itemId: string,
+  delta: string
+): ThreadTurn {
+  return updateReasoningItem(turn, itemId, (item) => ({
+    ...item,
+    text: (item.text ?? "") + delta
+  }));
+}
+
+function updateReasoningItem(
+  turn: ThreadTurn,
+  itemId: string,
+  updater: (item: ReasoningItem) => ReasoningItem
+): ThreadTurn {
+  const items = [...turn.items];
+  const itemIndex = items.findIndex((item) => item.id === itemId);
+  const existingItem = items[itemIndex];
+  const baseItem = ensureReasoningItem(existingItem, itemId);
+  if (!baseItem) {
+    return turn;
+  }
+
+  const nextItem = updater(baseItem);
+  if (itemIndex === -1) {
+    items.push(nextItem);
+  } else {
+    items[itemIndex] = nextItem;
+  }
+
+  return {
+    ...turn,
+    items
+  };
+}
+
+function createEmptyAgentMessageItem(
+  itemId: string
+): AgentMessageItem {
+  return {
+    id: itemId,
+    type: "agentMessage",
+    text: ""
+  };
+}
+
+function ensureAgentMessageItem(
+  item: ThreadItem | undefined,
+  itemId: string
+): AgentMessageItem | null {
+  if (!item) {
+    return createEmptyAgentMessageItem(itemId);
+  }
+  return isAgentMessageItem(item) ? item : null;
+}
+
+function createEmptyPlanItem(itemId: string): PlanItem {
+  return {
+    id: itemId,
+    type: "plan",
+    text: ""
+  };
+}
+
+function ensurePlanItem(item: ThreadItem | undefined, itemId: string): PlanItem | null {
+  if (!item) {
+    return createEmptyPlanItem(itemId);
+  }
+  return isPlanItem(item) ? item : null;
+}
+
+function createEmptyReasoningItem(itemId: string): ReasoningItem {
+  return {
+    id: itemId,
+    type: "reasoning",
+    summary: [],
+    text: ""
+  };
+}
+
+function ensureReasoningItem(
+  item: ThreadItem | undefined,
+  itemId: string
+): ReasoningItem | null {
+  if (!item) {
+    return createEmptyReasoningItem(itemId);
+  }
+  return isReasoningItem(item) ? item : null;
+}
+
+function createEmptyCommandExecutionItem(itemId: string): CommandExecutionItem {
+  return {
+    id: itemId,
+    type: "commandExecution",
+    command: "",
+    status: "inProgress",
+    aggregatedOutput: ""
+  };
+}
+
+function ensureCommandExecutionItem(
+  item: ThreadItem | undefined,
+  itemId: string
+): CommandExecutionItem | null {
+  if (!item) {
+    return createEmptyCommandExecutionItem(itemId);
+  }
+  return isCommandExecutionItem(item) ? item : null;
+}
+
+function isAgentMessageItem(item: ThreadItem): item is AgentMessageItem {
+  return item.type === "agentMessage";
+}
+
+function isPlanItem(item: ThreadItem): item is PlanItem {
+  return item.type === "plan";
+}
+
+function isReasoningItem(item: ThreadItem): item is ReasoningItem {
+  return item.type === "reasoning";
+}
+
+function isCommandExecutionItem(item: ThreadItem): item is CommandExecutionItem {
+  return item.type === "commandExecution";
+}
+
+function upsertThreadRequest(
+  state: ThreadConversationState,
+  request: AppServerServerRequest
+): ThreadConversationState {
+  const requestId = `${request.id}`;
+  const requests = [...state.requests];
+  const existingIndex = requests.findIndex(
+    (existingRequest) => `${existingRequest.id}` === requestId
+  );
+  if (existingIndex === -1) {
+    requests.push(request);
+  } else {
+    requests[existingIndex] = request;
+  }
+
+  return {
+    ...state,
+    requests
+  };
+}
+
+function buildPlanSummaryItem(
+  turn: ThreadTurn | null,
+  turnId: string,
+  explanation: string | null,
+  plan: Array<{ step: string; status: string }>
+): Extract<ThreadItem, { type: "plan" }> {
+  const existingPlanItem =
+    turn?.items.find((item) => item.type === "plan") ?? null;
+  const lines = plan.map((step, index) => {
+    return `${index + 1}. [${step.status}] ${step.step}`;
+  });
+  const text = [
+    ...(explanation && explanation.length > 0 ? [explanation] : []),
+    ...lines
+  ].join("\n");
+
+  return {
+    id: existingPlanItem?.id ?? `stream-plan-${turnId}`,
+    type: "plan",
+    text
+  };
 }

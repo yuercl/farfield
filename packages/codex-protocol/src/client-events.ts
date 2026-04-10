@@ -3,12 +3,12 @@ import { NonEmptyStringSchema, NonNegativeIntSchema } from "./common.js";
 import { ProtocolValidationError } from "./errors.js";
 import { ThreadStreamStateChangedParamsSchema } from "./thread.js";
 
-export const IpcRequestIdSchema = NonEmptyStringSchema;
+export const ClientEventRequestIdSchema = NonEmptyStringSchema;
 
-export const IpcRequestFrameSchema = z
+export const ClientRequestEnvelopeSchema = z
   .object({
     type: z.literal("request"),
-    requestId: IpcRequestIdSchema,
+    requestId: ClientEventRequestIdSchema,
     method: NonEmptyStringSchema,
     params: z.unknown().optional(),
     targetClientId: NonEmptyStringSchema.optional(),
@@ -17,10 +17,10 @@ export const IpcRequestFrameSchema = z
   })
   .passthrough();
 
-export const IpcResponseFrameSchema = z
+export const ClientResponseEnvelopeSchema = z
   .object({
     type: z.literal("response"),
-    requestId: IpcRequestIdSchema,
+    requestId: ClientEventRequestIdSchema,
     method: NonEmptyStringSchema.optional(),
     handledByClientId: NonEmptyStringSchema.optional(),
     resultType: z.enum(["success", "error"]),
@@ -29,7 +29,7 @@ export const IpcResponseFrameSchema = z
   })
   .passthrough();
 
-export const IpcBroadcastFrameSchema = z
+export const ClientBroadcastEnvelopeSchema = z
   .object({
     type: z.literal("broadcast"),
     method: NonEmptyStringSchema,
@@ -40,18 +40,18 @@ export const IpcBroadcastFrameSchema = z
   })
   .passthrough();
 
-export const IpcClientDiscoveryRequestFrameSchema = z
+export const ClientDiscoveryRequestEnvelopeSchema = z
   .object({
     type: z.literal("client-discovery-request"),
-    requestId: IpcRequestIdSchema,
-    request: IpcRequestFrameSchema
+    requestId: ClientEventRequestIdSchema,
+    request: ClientRequestEnvelopeSchema
   })
   .passthrough();
 
-export const IpcClientDiscoveryResponseFrameSchema = z
+export const ClientDiscoveryResponseEnvelopeSchema = z
   .object({
     type: z.literal("client-discovery-response"),
-    requestId: IpcRequestIdSchema,
+    requestId: ClientEventRequestIdSchema,
     response: z
       .object({
         canHandle: z.boolean()
@@ -60,15 +60,15 @@ export const IpcClientDiscoveryResponseFrameSchema = z
   })
   .passthrough();
 
-export const IpcFrameSchema = z.union([
-  IpcRequestFrameSchema,
-  IpcResponseFrameSchema,
-  IpcBroadcastFrameSchema,
-  IpcClientDiscoveryRequestFrameSchema,
-  IpcClientDiscoveryResponseFrameSchema
+export const ClientEventEnvelopeSchema = z.union([
+  ClientRequestEnvelopeSchema,
+  ClientResponseEnvelopeSchema,
+  ClientBroadcastEnvelopeSchema,
+  ClientDiscoveryRequestEnvelopeSchema,
+  ClientDiscoveryResponseEnvelopeSchema
 ]);
 
-export const ThreadStreamStateChangedBroadcastSchema: z.ZodObject<
+export const ThreadStreamEventSchema: z.ZodObject<
   {
     type: z.ZodLiteral<"broadcast">;
     method: z.ZodLiteral<"thread-stream-state-changed">;
@@ -87,33 +87,34 @@ export const ThreadStreamStateChangedBroadcastSchema: z.ZodObject<
   })
   .passthrough();
 
-export type IpcFrame = z.infer<typeof IpcFrameSchema>;
-export type IpcRequestFrame = z.infer<typeof IpcRequestFrameSchema>;
-export type IpcResponseFrame = z.infer<typeof IpcResponseFrameSchema>;
-export type IpcBroadcastFrame = z.infer<typeof IpcBroadcastFrameSchema>;
-export type IpcClientDiscoveryRequestFrame = z.infer<typeof IpcClientDiscoveryRequestFrameSchema>;
-export type IpcClientDiscoveryResponseFrame = z.infer<typeof IpcClientDiscoveryResponseFrameSchema>;
-export type ThreadStreamStateChangedBroadcast = z.infer<
-  typeof ThreadStreamStateChangedBroadcastSchema
+export type ClientEventEnvelope = z.infer<typeof ClientEventEnvelopeSchema>;
+export type ClientRequestEnvelope = z.infer<typeof ClientRequestEnvelopeSchema>;
+export type ClientResponseEnvelope = z.infer<typeof ClientResponseEnvelopeSchema>;
+export type ClientBroadcastEnvelope = z.infer<typeof ClientBroadcastEnvelopeSchema>;
+export type ClientDiscoveryRequestEnvelope = z.infer<
+  typeof ClientDiscoveryRequestEnvelopeSchema
+>;
+export type ClientDiscoveryResponseEnvelope = z.infer<
+  typeof ClientDiscoveryResponseEnvelopeSchema
+>;
+export type ThreadStreamEvent = z.infer<
+  typeof ThreadStreamEventSchema
 >;
 
-export function parseIpcFrame(value: unknown): IpcFrame {
-  const result = IpcFrameSchema.safeParse(value);
+export function parseClientEventEnvelope(value: unknown): ClientEventEnvelope {
+  const result = ClientEventEnvelopeSchema.safeParse(value);
   if (!result.success) {
-    throw ProtocolValidationError.fromZod("IpcFrame", result.error);
+    throw ProtocolValidationError.fromZod("ClientEventEnvelope", result.error);
   }
   return result.data;
 }
 
-export function parseThreadStreamStateChangedBroadcast(
+export function parseThreadStreamEvent(
   value: unknown
-): ThreadStreamStateChangedBroadcast {
-  const result = ThreadStreamStateChangedBroadcastSchema.safeParse(value);
+): ThreadStreamEvent {
+  const result = ThreadStreamEventSchema.safeParse(value);
   if (!result.success) {
-    throw ProtocolValidationError.fromZod(
-      "ThreadStreamStateChangedBroadcast",
-      result.error
-    );
+    throw ProtocolValidationError.fromZod("ThreadStreamEvent", result.error);
   }
   return result.data;
 }

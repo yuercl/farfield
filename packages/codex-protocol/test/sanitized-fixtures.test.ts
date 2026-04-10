@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { parseIpcFrame, parseThreadStreamStateChangedBroadcast } from "../src/index.js";
+import { parseClientEventEnvelope, parseThreadStreamEvent } from "../src/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,7 +10,7 @@ const fixtureDir = path.join(__dirname, "fixtures", "sanitized");
 
 const bannedPatterns = [/\/Users\//i, /anshu/i, /OpenRLM/i, /codextemp/i];
 
-function isIpcFrameCandidate(value: unknown): boolean {
+function isClientEventEnvelopeCandidate(value: unknown): boolean {
   if (!value || typeof value !== "object") {
     return false;
   }
@@ -48,14 +48,14 @@ describe("sanitized fixtures", () => {
         }
 
         const payload = parsed["payload"];
-        if (!isIpcFrameCandidate(payload)) {
+        if (!isClientEventEnvelopeCandidate(payload)) {
           continue;
         }
 
-        const frame = parseIpcFrame(payload);
+        const frame = parseClientEventEnvelope(payload);
 
         if (frame.type === "broadcast" && frame.method === "thread-stream-state-changed") {
-          parseThreadStreamStateChangedBroadcast(frame);
+          parseThreadStreamEvent(frame);
         }
       }
     }
