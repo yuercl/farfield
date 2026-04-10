@@ -216,6 +216,11 @@ interface AppViewSnapshot {
   activeTab: "chat" | "debug";
 }
 
+interface SidebarTargetResult {
+  target: ServerTargetOption;
+  result: SidebarThreadsResponse;
+}
+
 interface MobileSidebarSwipeGesture {
   mode: "open" | "close";
   startX: number;
@@ -397,6 +402,36 @@ function buildThreadSignature(thread: Thread): string {
     thread.cwd ?? "",
     thread.source ?? "",
   ].join("|");
+}
+
+function mergeSidebarTargetResults(
+  results: readonly SidebarTargetResult[],
+  primaryBaseUrl: string,
+): {
+  threads: Thread[];
+  errors: ThreadListProviderErrors;
+} {
+  const incomingThreads = sortThreadsByRecency(
+    results.flatMap(({ target, result }) =>
+      result.rows.map((thread) => ({
+        ...thread,
+        serverId: target.id,
+        serverLabel: target.label,
+        serverBaseUrl: target.baseUrl,
+      })),
+    ),
+  );
+
+  const primaryResult =
+    results.find(({ target }) => target.baseUrl === primaryBaseUrl)?.result ??
+    null;
+  return {
+    threads: incomingThreads,
+    errors: primaryResult?.errors ?? {
+      codex: null,
+      opencode: null,
+    },
+  };
 }
 
 function buildThreadsSignature(threads: Thread[]): string[] {
@@ -1715,11 +1750,16 @@ export function App(): React.JSX.Element {
   const providerCatalogCacheRef = useRef<
     Map<string, ProviderCatalogCacheEntry>
   >(new Map());
+  const liveStateRef = useRef<LiveStateResponse | null>(initialSnapshot?.liveState ?? null);
+  const readThreadStateRef = useRef<ReadThreadResponse | null>(
+    initialSnapshot?.readThreadState ?? null,
+  );
   const threadsSignatureRef = useRef<string[]>([]);
   const modesSignatureRef = useRef<string[]>([]);
   const modelsSignatureRef = useRef<string[]>([]);
   const historyDetailCacheRef = useRef<Map<string, HistoryDetail>>(new Map());
   const historyDetailRequestIdRef = useRef(0);
+  const loadCoreRequestIdRef = useRef(0);
 
   /* Derived */
   const selectedThread = useMemo(
@@ -2365,6 +2405,8 @@ export function App(): React.JSX.Element {
     (connectedEnabledAgentCount === 0 && !openCodeConnected && !codexConfigured);
   /* Data loading */
   const loadCoreData = useCallback(async () => {
+    const requestId = loadCoreRequestIdRef.current + 1;
+    loadCoreRequestIdRef.current = requestId;
     const shouldLoadDebugData = activeTabRef.current === "debug";
     const now = Date.now();
     const activeCatalogBaseUrl =
@@ -2390,16 +2432,81 @@ export function App(): React.JSX.Element {
     const rateLimitsPromise = getAccountRateLimits(activeCatalogBaseUrl).catch(
       () => null,
     );
-    const sidebarPromises = serverTargets.map(async (target) => ({
-      target,
-      result: await listSidebarThreads({
+    const sidebarResultsByTarget = new Map<string, SidebarTargetResult>();
+    const sidebarPromises = serverTargets.map(async (target) => {
+      const result = await listSidebarThreads({
         limit: 80,
         archived: false,
         all: false,
         maxPages: 1,
         baseUrlOverride: target.baseUrl,
-      }),
-    }));
+      });
+      return {
+        target,
+        result,
+      } satisfies SidebarTargetResult;
+    });
+    for (const sidebarPromise of sidebarPromises) {
+      void sidebarPromise.then((sidebarResult) => {
+        if (loadCoreRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        sidebarResultsByTarget.set(sidebarResult.target.id, sidebarResult);
+        const orderedResults = serverTargets
+          .map((target) => sidebarResultsByTarget.get(target.id))
+          .filter(
+            (result): result is SidebarTargetResult => result !== undefined,
+          );
+        const mergedSidebar = mergeSidebarTargetResults(
+          orderedResults,
+          activeCatalogBaseUrl,
+        );
+
+        const nextThreadProviders = new Map(threadProviderByIdRef.current);
+        for (const thread of mergedSidebar.threads) {
+          nextThreadProviders.set(thread.id, thread.provider);
+        }
+        threadProviderByIdRef.current = nextThreadProviders;
+
+        startTransition(() => {
+          setThreadListErrors((prev) =>
+            hasSameThreadListErrors(prev, mergedSidebar.errors)
+              ? prev
+              : mergedSidebar.errors,
+          );
+          setThreads((previousThreads) => {
+            const nextThreads = mergeIncomingThreads(
+              mergedSidebar.threads,
+              previousThreads,
+            );
+            const existingIds = new Set(nextThreads.map((thread) => thread.id));
+            for (const thread of previousThreads) {
+              if (existingIds.has(thread.id)) {
+                continue;
+              }
+              const shouldKeepThread =
+                optimisticSelectedThreadIdsRef.current.has(thread.id) ||
+                thread.id === selectedThreadIdRef.current;
+              if (!shouldKeepThread) {
+                continue;
+              }
+              existingIds.add(thread.id);
+              nextThreads.push(thread);
+            }
+            const sortedThreads = sortThreadsByRecency(nextThreads);
+            const nextThreadsSignature = buildThreadsSignature(sortedThreads);
+            if (
+              signaturesMatch(threadsSignatureRef.current, nextThreadsSignature)
+            ) {
+              return previousThreads;
+            }
+            threadsSignatureRef.current = nextThreadsSignature;
+            return sortedThreads;
+          });
+        });
+      });
+    }
     const tracePromise = shouldLoadDebugData
       ? getTraceStatus()
       : Promise.resolve<TraceStatus | null>(null);
@@ -2408,24 +2515,22 @@ export function App(): React.JSX.Element {
       : Promise.resolve<HistoryResponse | null>(null);
 
     const sidebarResults = await Promise.allSettled(sidebarPromises);
-    const successfulSidebarResults = sidebarResults.filter(
-      (
-        result,
-      ): result is PromiseFulfilledResult<{
-        target: ServerTargetOption;
-        result: SidebarThreadsResponse;
-      }> => result.status === "fulfilled",
+    if (loadCoreRequestIdRef.current !== requestId) {
+      return;
+    }
+    const successfulSidebarResults = sidebarResults
+      .filter(
+        (
+          result,
+        ): result is PromiseFulfilledResult<SidebarTargetResult> =>
+          result.status === "fulfilled",
+      )
+      .map((result) => result.value);
+    const mergedSidebar = mergeSidebarTargetResults(
+      successfulSidebarResults,
+      activeCatalogBaseUrl,
     );
-    const incomingThreads = sortThreadsByRecency(
-      successfulSidebarResults.flatMap(({ value }) =>
-        value.result.rows.map((thread) => ({
-          ...thread,
-          serverId: value.target.id,
-          serverLabel: value.target.label,
-          serverBaseUrl: value.target.baseUrl,
-        })),
-      ),
-    );
+    const incomingThreads = mergedSidebar.threads;
     const optimisticSelectedThreadIds = optimisticSelectedThreadIdsRef.current;
     if (optimisticSelectedThreadIds.size > 0) {
       for (const thread of incomingThreads) {
@@ -2437,14 +2542,7 @@ export function App(): React.JSX.Element {
       nextThreadProviders.set(thread.id, thread.provider);
     }
     threadProviderByIdRef.current = nextThreadProviders;
-    const primarySidebarResult =
-      successfulSidebarResults.find(
-        ({ value }) => value.target.baseUrl === activeCatalogBaseUrl,
-      ) ?? null;
-    const nextThreadErrors = primarySidebarResult?.value.result.errors ?? {
-      codex: null,
-      opencode: null,
-    };
+    const nextThreadErrors = mergedSidebar.errors;
     setThreadListErrors((prev) =>
       hasSameThreadListErrors(prev, nextThreadErrors) ? prev : nextThreadErrors,
     );
@@ -2484,6 +2582,9 @@ export function App(): React.JSX.Element {
         historyPromise,
         rateLimitsPromise,
       ]);
+    if (loadCoreRequestIdRef.current !== requestId) {
+      return;
+    }
 
     if (healthResult.status === "rejected") {
       console.error("Failed to load health state", healthResult.reason);
@@ -2722,6 +2823,9 @@ export function App(): React.JSX.Element {
     } catch (error) {
       console.error("Failed to load provider model catalog", error);
       setError(toErrorMessage(error));
+      return;
+    }
+    if (loadCoreRequestIdRef.current !== requestId) {
       return;
     }
 
@@ -3383,15 +3487,14 @@ export function App(): React.JSX.Element {
       source.onopen = () => {
         setEventsConnected(true);
         reconnectDelayMs = 1000;
-        if (hasOpenedConnection) {
-          return;
-        }
-        hasOpenedConnection = true;
         scheduleRefresh(
           true,
           activeTabRef.current === "debug",
           Boolean(selectedThreadIdRef.current),
         );
+        if (!hasOpenedConnection) {
+          hasOpenedConnection = true;
+        }
       };
 
       source.onmessage = (event: MessageEvent<string>) => {
@@ -3428,7 +3531,9 @@ export function App(): React.JSX.Element {
                 cachedState?.liveState?.conversationState ??
                 cachedState?.readThreadState?.thread ??
                 (parsedEvent.threadId === selectedThreadIdRef.current
-                  ? (liveState?.conversationState ?? readThreadState?.thread ?? null)
+                  ? (liveStateRef.current?.conversationState ??
+                    readThreadStateRef.current?.thread ??
+                    null)
                   : null);
 
               if (!currentThreadState) {
@@ -3514,8 +3619,8 @@ export function App(): React.JSX.Element {
                   (
                     threadViewStateCacheRef.current.get(parsedEvent.threadId)
                       ?.liveState?.conversationState ??
-                    liveState?.conversationState ??
-                    readThreadState?.thread ??
+                    liveStateRef.current?.conversationState ??
+                    readThreadStateRef.current?.thread ??
                     null
                   ),
                 ) !==
@@ -3813,6 +3918,14 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     isChatAtBottomRef.current = isChatAtBottom;
   }, [isChatAtBottom]);
+
+  useEffect(() => {
+    liveStateRef.current = liveState;
+  }, [liveState]);
+
+  useEffect(() => {
+    readThreadStateRef.current = readThreadState;
+  }, [readThreadState]);
 
   // Track whether chat view is at the bottom and whether the user still wants auto-follow.
   useEffect(() => {
