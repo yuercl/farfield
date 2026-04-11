@@ -15,6 +15,7 @@ worker.js
 
 # Runtime logs
 *.log
+.uploads/
 
 # Local debug fixture
 apps/server/invalid-thread-stream-events.jsonl
