@@ -28,12 +28,6 @@ Start the Farfield server:
 npx -y @farfield/server@latest
 ```
 
-or:
-
-```bash
-bunx @farfield/server@latest
-```
-
 This runs the backend on `127.0.0.1:4311` by default.
 
 Start Codex app-server separately and point Farfield at it:
@@ -74,11 +68,11 @@ We are working on easier options. Stay tuned!
 Clone the repo and do this:
 
 ```bash
-bun install
-bun run server
+npm install
+npm run server
 ```
 
-`bun run server` runs only the backend on `0.0.0.0:4311`.
+`npm run server` runs only the backend on `0.0.0.0:4311`.
 
 If you are using Codex CLI only, start Codex app-server first and then launch Farfield against it:
 
@@ -87,15 +81,15 @@ If you are using Codex CLI only, start Codex app-server first and then launch Fa
 codex app-server --listen ws://127.0.0.1:4320
 
 # terminal 2
-CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 bun run server
+CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 npm run server
 ```
 
 If you need to pick agent providers:
 
 ```bash
-bun run server -- --agents=opencode
-bun run server -- --agents=codex,opencode
-bun run server -- --agents=all
+npm run server -- --agents=opencode
+npm run server -- --agents=codex,opencode
+npm run server -- --agents=all
 ```
 
 > **Warning:** This exposes the Farfield server on your network. Only use on trusted networks. See below for how to configure Tailscale as a VPN for secure remote access.
@@ -105,8 +99,8 @@ bun run server -- --agents=all
 Use this if you are working on Farfield itself, or if you want to run both frontend and backend locally.
 
 ```bash
-bun install
-bun run dev
+npm install
+npm run dev
 ```
 
 Opens local frontend at `http://localhost:4312`. By default `dev` does not expose the port, it's only accessible on your device.
@@ -114,11 +108,11 @@ Opens local frontend at `http://localhost:4312`. By default `dev` does not expos
 More local dev options:
 
 ```bash
-bun run dev -- --agents=opencode             # OpenCode only
-bun run dev -- --agents=codex,opencode       # both
-bun run dev -- --agents=all                  # expands to codex,opencode
-bun run dev:remote                           # exposes frontend + backend on your network
-bun run dev:remote -- --agents=opencode      # remote mode with OpenCode only
+npm run dev -- --agents=opencode             # OpenCode only
+npm run dev -- --agents=codex,opencode       # both
+npm run dev -- --agents=all                  # expands to codex,opencode
+npm run dev:remote                           # exposes frontend + backend on your network
+npm run dev:remote -- --agents=opencode      # remote mode with OpenCode only
 ```
 
 If you are developing against Codex CLI only, use the same app-server setup in another terminal:
@@ -128,13 +122,13 @@ If you are developing against Codex CLI only, use the same app-server setup in a
 codex app-server --listen ws://127.0.0.1:4320
 
 # terminal 2
-CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 bun run dev
+CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 npm run dev
 ```
 
 Or for network-exposed local development:
 
 ```bash
-CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 bun run dev:remote
+CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 npm run dev:remote
 ```
 
 > **Warning:** `dev:remote` exposes Farfield with no authentication. Only use on trusted networks.
@@ -144,8 +138,8 @@ CODEX_APP_SERVER_URL=ws://127.0.0.1:4320 bun run dev:remote
 Build once and run in production mode with two commands:
 
 ```bash
-bun run build
-bun run start
+npm run build
+npm run start
 ```
 
 Open `http://127.0.0.1:4312`.
@@ -157,7 +151,7 @@ By default, this is local-only:
 If you need a custom backend origin for API proxying:
 
 ```bash
-FARFIELD_API_ORIGIN=http://127.0.0.1:4311 bun run start
+FARFIELD_API_ORIGIN=http://127.0.0.1:4311 npm run start
 ```
 
 ### React Compiler and production profiling
@@ -171,37 +165,36 @@ Example A/B commands:
 
 ```bash
 # default production build (compiler enabled)
-bun run --filter @farfield/web build
+npm run build --workspace @farfield/web
 
 # baseline production build (compiler disabled)
-REACT_COMPILER=0 bun run --filter @farfield/web build
+REACT_COMPILER=0 npm run build --workspace @farfield/web
 
 # production profiling build (compiler enabled)
-REACT_PROFILING=1 bun run --filter @farfield/web build
+REACT_PROFILING=1 npm run build --workspace @farfield/web
 
 # production profiling build (compiler disabled)
-REACT_PROFILING=1 REACT_COMPILER=0 bun run --filter @farfield/web build
+REACT_PROFILING=1 REACT_COMPILER=0 npm run build --workspace @farfield/web
 ```
 
 Run two UIs side-by-side against one backend:
 
 ```bash
 # backend (terminal 1)
-bun run --filter @farfield/server start
+npm run start --workspace @farfield/server
 
 # baseline UI (terminal 2, compiler disabled)
-REACT_PROFILING=1 REACT_COMPILER=0 bun run --filter @farfield/web build -- --outDir dist-baseline
-bun run --filter @farfield/web preview -- --host 127.0.0.1 --port 4312 --strictPort --outDir dist-baseline
+REACT_PROFILING=1 REACT_COMPILER=0 npm run build --workspace @farfield/web -- --outDir dist-baseline
+npm run preview --workspace @farfield/web -- --host 127.0.0.1 --port 4312 --strictPort --outDir dist-baseline
 
 # compiler UI (terminal 3, compiler enabled by default)
-REACT_PROFILING=1 bun run --filter @farfield/web build -- --outDir dist-compiler
-bun run --filter @farfield/web preview -- --host 127.0.0.1 --port 4313 --strictPort --outDir dist-compiler
+REACT_PROFILING=1 npm run build --workspace @farfield/web -- --outDir dist-compiler
+npm run preview --workspace @farfield/web -- --host 127.0.0.1 --port 4313 --strictPort --outDir dist-compiler
 ```
 
 ## Requirements
 
 - Node.js 20+
-- Bun 1.2+ (needed for source checkout workflow)
 - Codex or OpenCode installed locally
 
 ### Codex modes
@@ -226,7 +219,7 @@ You still need to run the server locally so it can talk to your coding agent.
 ### 1) Start the Farfield server on your machine
 
 ```bash
-HOST=0.0.0.0 PORT=4311 bun run --filter @farfield/server dev
+HOST=0.0.0.0 PORT=4311 npm run dev --workspace @farfield/server
 ```
 
 Quick local check:

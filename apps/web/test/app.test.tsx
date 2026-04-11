@@ -1666,7 +1666,7 @@ describe("App", () => {
     const commandItem: UnifiedItem = {
       id: "command-1",
       type: "commandExecution",
-      command: "bun run test",
+      command: "npm run test",
       status: "completed",
       aggregatedOutput: "ok",
       exitCode: 0,
@@ -1729,7 +1729,7 @@ describe("App", () => {
     expect(
       await screen.findByText("Live updates failed for this thread."),
     ).toBeTruthy();
-    expect(screen.queryByText("bun run test")).toBeNull();
+    expect(screen.queryByText("npm run test")).toBeNull();
   });
 
   it("renders thread items from live state when live state is healthy", async () => {
@@ -1785,7 +1785,7 @@ describe("App", () => {
             {
               id: "command-live-1",
               type: "commandExecution",
-              command: "bun run lint",
+              command: "npm run lint",
               status: "inProgress",
               aggregatedOutput: "",
               exitCode: null,
@@ -1799,7 +1799,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect((await screen.findAllByText("bun run lint")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("npm run lint")).length).toBeGreaterThan(0);
     expect(screen.queryByText("read-canonical-item")).toBeNull();
   });
 

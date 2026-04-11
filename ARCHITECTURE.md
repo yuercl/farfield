@@ -21,7 +21,7 @@ Farfield now routes both providers through one strict unified surface.
 Run this before pushing:
 
 ```bash
-bun run verify:strict
+npm run verify:strict
 ```
 
 This runs:
@@ -37,7 +37,7 @@ This runs:
 Farfield now vendors official Codex app-server schemas and generates protocol Zod validators from them.
 
 ```bash
-bun run generate:codex-schema
+npm run generate:codex-schema
 ```
 
 This command updates:
@@ -50,22 +50,22 @@ This command updates:
 Farfield also generates an OpenCode manifest from SDK unions used by the mapper layer.
 
 ```bash
-bun run generate:opencode-manifest
+npm run generate:opencode-manifest
 ```
 
 ## Provider Schema Update Flow
 
 When Codex or OpenCode updates protocol/SDK shapes:
 
-1. Run `bun run generate:codex-schema`
-2. Run `bun run generate:opencode-manifest`
-3. Run `bun run verify:strict`
+1. Run `npm run generate:codex-schema`
+2. Run `npm run generate:opencode-manifest`
+3. Run `npm run verify:strict`
 4. Commit generated changes together with any mapper updates
 
 ## Release Checklist
 
-1. Run `bun run verify:strict`
-2. Confirm `bun run generate:codex-schema` produces no uncommitted changes
-3. Confirm `bun run generate:opencode-manifest` produces no uncommitted changes
+1. Run `npm run verify:strict`
+2. Confirm `npm run generate:codex-schema` produces no uncommitted changes
+3. Confirm `npm run generate:opencode-manifest` produces no uncommitted changes
 4. Review `git status` for only intended files
 5. Ship only after all workspace tests pass
