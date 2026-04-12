@@ -12,7 +12,7 @@ import type {
   UserInputResponsePayload,
 } from "@farfield/protocol";
 
-export type AgentId = "codex" | "opencode";
+export type AgentId = "codex" | "opencode" | "claude" | "qwen";
 
 export interface AgentCapabilities {
   canListModels: boolean;

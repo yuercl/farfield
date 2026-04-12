@@ -236,6 +236,34 @@ interface SidebarTargetResult {
   result: SidebarThreadsResponse;
 }
 
+const EMPTY_THREAD_LIST_ERRORS: ThreadListProviderErrors = {
+  codex: null,
+  opencode: null,
+  claude: null,
+  qwen: null,
+};
+
+const AGENT_LABEL_BY_ID: Record<AgentId, string> = {
+  codex: "Codex",
+  opencode: "OpenCode",
+  claude: "Claude Code",
+  qwen: "Qwen Code",
+};
+
+const AGENT_MONOGRAM_BY_ID: Record<AgentId, string> = {
+  codex: "C",
+  opencode: "O",
+  claude: "A",
+  qwen: "Q",
+};
+
+const AGENT_ICON_CLASS_BY_ID: Record<AgentId, string> = {
+  codex: "bg-emerald-100 text-emerald-800",
+  opencode: "bg-sky-100 text-sky-800",
+  claude: "bg-orange-100 text-orange-800",
+  qwen: "bg-amber-100 text-amber-800",
+};
+
 interface MobileSidebarSwipeGesture {
   mode: "open" | "close";
   startX: number;
@@ -455,6 +483,8 @@ function mergeSidebarTargetResults(
     errors: primaryResult?.errors ?? {
       codex: null,
       opencode: null,
+      claude: null,
+      qwen: null,
     },
   };
 }
@@ -651,13 +681,11 @@ function buildThreadListErrorMessage(
   errors: ThreadListProviderErrors,
 ): string | null {
   const messages: string[] = [];
-
-  if (errors.codex) {
-    messages.push(`Codex: ${errors.codex.message}`);
-  }
-
-  if (errors.opencode) {
-    messages.push(`OpenCode: ${errors.opencode.message}`);
+  for (const agentId of Object.keys(AGENT_LABEL_BY_ID) as AgentId[]) {
+    const error = errors[agentId];
+    if (error) {
+      messages.push(`${AGENT_LABEL_BY_ID[agentId]}: ${error.message}`);
+    }
   }
 
   if (messages.length === 0) {
@@ -752,7 +780,9 @@ const MOBILE_SWIPE_EDGE_PX = 24;
 const MOBILE_SIDEBAR_TOGGLE_THRESHOLD_PX = 88;
 const AGENT_FAVICON_BY_ID: Record<AgentId, string> = {
   codex: "https://openai.com/favicon.ico",
-  opencode: "https://opencode.ai/favicon.ico",
+  opencode: "/agent-icons/opencode.svg",
+  claude: "/agent-icons/claude.svg",
+  qwen: "/agent-icons/qwen.svg",
 };
 
 let appViewSnapshotCache: AppViewSnapshot | null = null;
@@ -802,19 +832,37 @@ function AgentFavicon({
   className?: string;
 }) {
   const faviconUrl = agentFavicon(agentId);
-  if (!faviconUrl) {
-    return null;
+  const [imageFailed, setImageFailed] = useState(false);
+  const iconClassName = className ?? "h-4 w-4";
+
+  if (!faviconUrl || imageFailed) {
+    return (
+      <span
+        aria-label={label}
+        title={label}
+        className={`inline-flex items-center justify-center rounded-[0.35rem] text-[9px] font-semibold leading-none shadow-sm ring-1 ring-black/8 ${AGENT_ICON_CLASS_BY_ID[agentId]} ${iconClassName}`}
+      >
+        {AGENT_MONOGRAM_BY_ID[agentId]}
+      </span>
+    );
   }
 
   return (
-    <img
-      src={faviconUrl}
-      alt={label}
+    <span
+      aria-label={label}
       title={label}
-      className={className}
-      loading="lazy"
-      decoding="async"
-    />
+      className={`inline-flex items-center justify-center rounded-[0.35rem] bg-white p-[2px] shadow-sm ring-1 ring-black/8 ${iconClassName}`}
+    >
+      <img
+        src={faviconUrl}
+        alt={label}
+        title={label}
+        className="h-full w-full object-contain"
+        loading="lazy"
+        decoding="async"
+        onError={() => setImageFailed(true)}
+      />
+    </span>
   );
 }
 
@@ -838,7 +886,12 @@ function buildModeSignature(
 }
 
 function parseAgentId(value: string): AgentId | null {
-  return value === "codex" || value === "opencode" ? value : null;
+  return value === "codex" ||
+    value === "opencode" ||
+    value === "claude" ||
+    value === "qwen"
+    ? value
+    : null;
 }
 
 function getConversationStateUpdatedAt(
@@ -1780,10 +1833,7 @@ export function App(): React.JSX.Element {
   );
   const [threadListErrors, setThreadListErrors] =
     useState<ThreadListProviderErrors>(
-      initialSnapshot?.threadListErrors ?? {
-        codex: null,
-        opencode: null,
-      },
+      initialSnapshot?.threadListErrors ?? EMPTY_THREAD_LIST_ERRORS,
     );
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
     initialSnapshot?.selectedThreadId ?? initialUiState.threadId,
@@ -2709,7 +2759,7 @@ export function App(): React.JSX.Element {
   );
   const codexConfigured = agentsById.codex?.enabled === true;
   const codexConnected = agentsById.codex?.connected === true;
-  const openCodeConnected = agentsById.opencode?.connected === true;
+  const hasEnabledAgent = agentDescriptors.some((descriptor) => descriptor.enabled);
   const connectedEnabledAgentCount = agentDescriptors.filter(
     (descriptor) => descriptor.enabled && descriptor.connected,
   ).length;
@@ -2718,10 +2768,11 @@ export function App(): React.JSX.Element {
       ? null
       : health?.state.lastError ?? null;
   const allSystemsReady =
-    health?.state.appReady === true && connectedEnabledAgentCount > 0;
+    (codexConfigured ? health?.state.appReady === true : true) &&
+    connectedEnabledAgentCount > 0;
   const hasAnySystemFailure =
-    health?.state.appReady === false ||
-    (connectedEnabledAgentCount === 0 && !openCodeConnected && !codexConfigured);
+    (codexConfigured && health?.state.appReady === false) ||
+    (connectedEnabledAgentCount === 0 && hasEnabledAgent);
   /* Data loading */
   const loadCoreData = useCallback(async () => {
     const requestId = loadCoreRequestIdRef.current + 1;
@@ -7010,7 +7061,16 @@ export function App(): React.JSX.Element {
                         .filter((agent) => agent.enabled)
                         .map((agent) => (
                           <SelectItem key={agent.id} value={agent.id}>
-                            {agent.label}
+                            <span className="flex items-center gap-2">
+                              <span className="shrink-0 h-4 w-4 rounded-sm bg-muted/30 ring-1 ring-border/60 flex items-center justify-center overflow-hidden">
+                                <AgentFavicon
+                                  agentId={agent.id}
+                                  label={agent.label}
+                                  className="h-3.5 w-3.5"
+                                />
+                              </span>
+                              <span>{agent.label}</span>
+                            </span>
                           </SelectItem>
                         ))}
                     </SelectContent>

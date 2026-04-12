@@ -11,6 +11,7 @@ import type {
 import {
   JsonValueSchema,
   UnifiedCommandSchema,
+  UnifiedProviderIdSchema,
   type UnifiedEvent,
   type JsonValue,
   type UnifiedProviderId,
@@ -40,7 +41,9 @@ import {
   CodexAgentAdapter,
   isAuthenticationRequiredToReadRateLimitsAppServerRpcError,
 } from "./agents/adapters/codex-agent.js";
+import { ClaudeCodeAgentAdapter } from "./agents/adapters/claude-code-agent.js";
 import { OpenCodeAgentAdapter } from "./agents/adapters/opencode-agent.js";
+import { QwenCodeAgentAdapter } from "./agents/adapters/qwen-code-agent.js";
 import type { AgentAdapter } from "./agents/types.js";
 import {
   UnifiedBackendFeatureError,
@@ -110,6 +113,22 @@ function resolveCodexAppServerUrl(): string | null {
 
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveClaudeExecutablePath(): string {
+  if (process.env["CLAUDE_CLI_PATH"]) {
+    return process.env["CLAUDE_CLI_PATH"];
+  }
+
+  return "claude";
+}
+
+function resolveQwenExecutablePath(): string {
+  if (process.env["QWEN_CLI_PATH"]) {
+    return process.env["QWEN_CLI_PATH"];
+  }
+
+  return "qwen";
 }
 
 function resolveGitCommitHash(): string | null {
@@ -248,6 +267,8 @@ const configuredAgentIds = parsedCli.agentIds;
 const configuredUnifiedProviders: UnifiedProviderId[] = [...configuredAgentIds];
 const codexExecutable = resolveCodexExecutablePath();
 const codexAppServerUrl = resolveCodexAppServerUrl();
+const claudeExecutable = resolveClaudeExecutablePath();
+const qwenExecutable = resolveQwenExecutablePath();
 const gitCommit = resolveGitCommitHash();
 
 const history: HistoryEntry[] = [];
@@ -309,6 +330,8 @@ function pushSystem(
 
 let codexAdapter: CodexAgentAdapter | null = null;
 let openCodeAdapter: OpenCodeAgentAdapter | null = null;
+let claudeAdapter: ClaudeCodeAgentAdapter | null = null;
+let qwenAdapter: QwenCodeAgentAdapter | null = null;
 const adapters: AgentAdapter[] = [];
 let unifiedAdapters: ReturnType<typeof createUnifiedProviderAdapters> | null =
   null;
@@ -358,6 +381,24 @@ for (const agentId of configuredAgentIds) {
   if (agentId === "opencode") {
     openCodeAdapter = new OpenCodeAgentAdapter();
     adapters.push(openCodeAdapter);
+    continue;
+  }
+
+  if (agentId === "claude") {
+    claudeAdapter = new ClaudeCodeAgentAdapter({
+      executablePath: claudeExecutable,
+      workspaceDir: DEFAULT_WORKSPACE,
+    });
+    adapters.push(claudeAdapter);
+    continue;
+  }
+
+  if (agentId === "qwen") {
+    qwenAdapter = new QwenCodeAgentAdapter({
+      executablePath: qwenExecutable,
+      workspaceDir: DEFAULT_WORKSPACE,
+    });
+    adapters.push(qwenAdapter);
   }
 }
 
@@ -365,6 +406,8 @@ const registry = new AgentRegistry(adapters);
 unifiedAdapters = createUnifiedProviderAdapters({
   codex: codexAdapter,
   opencode: openCodeAdapter,
+  claude: claudeAdapter,
+  qwen: qwenAdapter,
 });
 
 function getRuntimeStateSnapshot(): Record<string, unknown> {
@@ -416,6 +459,10 @@ function buildUnifiedProviderStateEvents(): UnifiedEvent[] {
           ? (runtimeLastError ??
             codexAdapter?.getRuntimeState().lastError ??
             null)
+          : provider === "claude"
+            ? (runtimeLastError ?? claudeAdapter?.getLastError() ?? null)
+          : provider === "qwen"
+            ? (runtimeLastError ?? qwenAdapter?.getLastError() ?? null)
           : (runtimeLastError ?? null),
     };
   });
@@ -1277,10 +1324,11 @@ function readWorkspaceGitDiff(cwdPath: string, filePath: string): {
 function parseUnifiedProviderId(
   value: string | null,
 ): UnifiedProviderId | null {
-  if (value === "codex" || value === "opencode") {
-    return value;
+  if (value === null) {
+    return null;
   }
-  return null;
+  const parsed = UnifiedProviderIdSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1332,6 +1380,8 @@ const server = http.createServer(async (req, res) => {
       const features = buildUnifiedFeatureMatrix({
         codex: codexAdapter,
         opencode: openCodeAdapter,
+        claude: claudeAdapter,
+        qwen: qwenAdapter,
       });
 
       jsonResponse(res, 200, {
@@ -1574,6 +1624,8 @@ const server = http.createServer(async (req, res) => {
       const cursors: Record<UnifiedProviderId, string | null> = {
         codex: null,
         opencode: null,
+        claude: null,
+        qwen: null,
       };
       const errors: Record<
         UnifiedProviderId,
@@ -1585,6 +1637,8 @@ const server = http.createServer(async (req, res) => {
       > = {
         codex: null,
         opencode: null,
+        claude: null,
+        qwen: null,
       };
 
       await Promise.all(
@@ -1671,6 +1725,8 @@ const server = http.createServer(async (req, res) => {
       > = {
         codex: null,
         opencode: null,
+        claude: null,
+        qwen: null,
       };
 
       await Promise.all(

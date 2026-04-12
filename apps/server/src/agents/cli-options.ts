@@ -1,10 +1,10 @@
 import { z } from "zod";
 import type { AgentId } from "./types.js";
 
-const AgentIdSchema = z.enum(["codex", "opencode"]);
+const AgentIdSchema = z.enum(["codex", "opencode", "claude", "qwen"]);
 
-export const ALL_AGENT_IDS: AgentId[] = ["codex", "opencode"];
-export const DEFAULT_AGENT_IDS: AgentId[] = ["codex"];
+export const ALL_AGENT_IDS: AgentId[] = ["codex", "opencode", "claude", "qwen"];
+export const DEFAULT_AGENT_IDS: AgentId[] = ["codex", "claude", "qwen"];
 
 export interface ServerCliOptions {
   agentIds: AgentId[];
@@ -72,7 +72,7 @@ export function formatServerHelpText(): string {
     "Usage: farfield-server [--agents=<ids>]",
     "",
     "Flags:",
-    "  --agents=<ids>   Comma-separated agent ids. Allowed: codex, opencode, all",
+    "  --agents=<ids>   Comma-separated agent ids. Allowed: codex, opencode, claude, qwen, all",
     "  --help           Show this help message",
   ].join("\n");
 }

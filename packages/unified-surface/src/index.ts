@@ -13,7 +13,7 @@ export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([JsonPrimitiveSchema, z.array(JsonValueSchema), z.record(JsonValueSchema)])
 );
 
-export const UnifiedProviderIdSchema = z.enum(["codex", "opencode"]);
+export const UnifiedProviderIdSchema = z.enum(["codex", "opencode", "claude", "qwen"]);
 export type UnifiedProviderId = z.infer<typeof UnifiedProviderIdSchema>;
 
 export const UNIFIED_FEATURE_IDS = [
@@ -67,7 +67,9 @@ export type UnifiedFeatureMatrix = Record<
 export const UnifiedFeatureMatrixSchema = z
   .object({
     codex: z.record(UnifiedFeatureIdSchema, UnifiedFeatureAvailabilitySchema),
-    opencode: z.record(UnifiedFeatureIdSchema, UnifiedFeatureAvailabilitySchema)
+    opencode: z.record(UnifiedFeatureIdSchema, UnifiedFeatureAvailabilitySchema),
+    claude: z.record(UnifiedFeatureIdSchema, UnifiedFeatureAvailabilitySchema),
+    qwen: z.record(UnifiedFeatureIdSchema, UnifiedFeatureAvailabilitySchema)
   })
   .strict();
 

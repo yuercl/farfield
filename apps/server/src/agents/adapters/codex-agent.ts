@@ -1632,15 +1632,17 @@ function mergeFileChangeItems(
   existing: FileChangeItem,
   incoming: Extract<ThreadItem, { type: "fileChange" }>
 ): FileChangeItem {
-  return {
+  const merged: FileChangeItem = {
     ...existing,
     ...incoming,
-    aggregatedOutput:
-      incoming.changes.length > 0
-        ? undefined
-        : existing.aggregatedOutput,
     changes: incoming.changes.length > 0 ? incoming.changes : existing.changes
   };
+
+  if (incoming.changes.length === 0 && existing.aggregatedOutput !== undefined) {
+    merged.aggregatedOutput = existing.aggregatedOutput;
+  }
+
+  return merged;
 }
 
 function appendTextDeltaToTurnItem(

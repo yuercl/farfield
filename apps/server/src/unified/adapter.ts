@@ -91,6 +91,34 @@ const PROVIDER_FEATURE_SUPPORT: Record<
     readStreamEvents: false,
     listProjectDirectories: true,
   },
+  claude: {
+    listThreads: true,
+    createThread: true,
+    readThread: true,
+    sendMessage: true,
+    interrupt: true,
+    listModels: false,
+    listCollaborationModes: false,
+    setCollaborationMode: false,
+    submitUserInput: false,
+    readLiveState: false,
+    readStreamEvents: false,
+    listProjectDirectories: false,
+  },
+  qwen: {
+    listThreads: true,
+    createThread: true,
+    readThread: true,
+    sendMessage: true,
+    interrupt: true,
+    listModels: false,
+    listCollaborationModes: false,
+    setCollaborationMode: false,
+    submitUserInput: false,
+    readLiveState: false,
+    readStreamEvents: false,
+    listProjectDirectories: false,
+  },
 };
 
 export class UnifiedBackendFeatureError extends Error {
@@ -191,6 +219,12 @@ export function createUnifiedProviderAdapters(
     opencode: adapters.opencode
       ? new AgentUnifiedProviderAdapter("opencode", adapters.opencode)
       : null,
+    claude: adapters.claude
+      ? new AgentUnifiedProviderAdapter("claude", adapters.claude)
+      : null,
+    qwen: adapters.qwen
+      ? new AgentUnifiedProviderAdapter("qwen", adapters.qwen)
+      : null,
   };
 }
 
@@ -200,6 +234,8 @@ export function buildUnifiedFeatureMatrix(
   const matrix: UnifiedFeatureMatrix = {
     codex: buildProviderFeatureAvailability("codex", adapters.codex),
     opencode: buildProviderFeatureAvailability("opencode", adapters.opencode),
+    claude: buildProviderFeatureAvailability("claude", adapters.claude),
+    qwen: buildProviderFeatureAvailability("qwen", adapters.qwen),
   };
 
   UnifiedFeatureMatrixSchema.parse(matrix);

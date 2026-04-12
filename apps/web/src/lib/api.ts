@@ -96,12 +96,16 @@ const UnifiedThreadsEnvelopeSchema = z
       .object({
         codex: z.string().nullable(),
         opencode: z.string().nullable(),
+        claude: z.string().nullable(),
+        qwen: z.string().nullable(),
       })
       .strict(),
     errors: z
       .object({
         codex: z.union([UnifiedProviderErrorSchema, z.null()]),
         opencode: z.union([UnifiedProviderErrorSchema, z.null()]),
+        claude: z.union([UnifiedProviderErrorSchema, z.null()]),
+        qwen: z.union([UnifiedProviderErrorSchema, z.null()]),
       })
       .strict(),
   })
@@ -364,12 +368,16 @@ const ThreadListResponseSchema = z
       .object({
         codex: z.string().nullable(),
         opencode: z.string().nullable(),
+        claude: z.string().nullable(),
+        qwen: z.string().nullable(),
       })
       .strict(),
     errors: z
       .object({
         codex: z.union([UnifiedProviderErrorSchema, z.null()]),
         opencode: z.union([UnifiedProviderErrorSchema, z.null()]),
+        claude: z.union([UnifiedProviderErrorSchema, z.null()]),
+        qwen: z.union([UnifiedProviderErrorSchema, z.null()]),
       })
       .strict(),
   })
@@ -383,6 +391,8 @@ const SidebarThreadsEnvelopeSchema = z
       .object({
         codex: z.union([UnifiedProviderErrorSchema, z.null()]),
         opencode: z.union([UnifiedProviderErrorSchema, z.null()]),
+        claude: z.union([UnifiedProviderErrorSchema, z.null()]),
+        qwen: z.union([UnifiedProviderErrorSchema, z.null()]),
       })
       .strict(),
   })
@@ -395,6 +405,8 @@ const SidebarThreadsResponseSchema = z
       .object({
         codex: z.union([UnifiedProviderErrorSchema, z.null()]),
         opencode: z.union([UnifiedProviderErrorSchema, z.null()]),
+        claude: z.union([UnifiedProviderErrorSchema, z.null()]),
+        qwen: z.union([UnifiedProviderErrorSchema, z.null()]),
       })
       .strict(),
   })
@@ -421,11 +433,15 @@ const CollaborationModesResponseSchema = z
 const PROVIDER_IDS = [
   "codex",
   "opencode",
+  "claude",
+  "qwen",
 ] as const satisfies ReadonlyArray<UnifiedProviderId>;
 
 const PROVIDER_LABELS: Record<UnifiedProviderId, string> = {
   codex: "Codex",
   opencode: "OpenCode",
+  claude: "Claude Code",
+  qwen: "Qwen Code",
 };
 
 export type AgentId = UnifiedProviderId;
@@ -761,7 +777,7 @@ export async function listAgentsForBaseUrl(
   const agents = await Promise.all(agentTasks);
 
   const firstEnabledAgentId = agents.find((agent) => agent.enabled)?.id;
-  const defaultAgentId = firstEnabledAgentId ?? "codex";
+  const defaultAgentId = firstEnabledAgentId ?? PROVIDER_IDS[0];
 
   return AgentsResponseSchema.parse({
     ok: true,
@@ -867,7 +883,7 @@ export async function createThread(input?: {
   ephemeral?: boolean;
   baseUrlOverride?: string;
 }): Promise<z.infer<typeof CreateThreadResponseSchema>> {
-  const provider = input?.agentId ?? "codex";
+  const provider = input?.agentId ?? PROVIDER_IDS[0];
   const result = await runUnifiedCommand({
     kind: "createThread",
     provider,

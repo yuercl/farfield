@@ -59,9 +59,37 @@ const OpenCodeThreadListItemSchema = z
   })
   .passthrough();
 
+const ClaudeThreadListItemSchema = z
+  .object({
+    id: z.string().min(1),
+    preview: z.string(),
+    title: ThreadTitleSchema,
+    isGenerating: ThreadIsGeneratingSchema,
+    createdAt: z.number().int().nonnegative(),
+    updatedAt: z.number().int().nonnegative(),
+    cwd: z.string().optional(),
+    source: z.literal("claude")
+  })
+  .passthrough();
+
+const QwenThreadListItemSchema = z
+  .object({
+    id: z.string().min(1),
+    preview: z.string(),
+    title: ThreadTitleSchema,
+    isGenerating: ThreadIsGeneratingSchema,
+    createdAt: z.number().int().nonnegative(),
+    updatedAt: z.number().int().nonnegative(),
+    cwd: z.string().optional(),
+    source: z.literal("qwen")
+  })
+  .passthrough();
+
 export const AppServerThreadListItemSchema = z.union([
   AppServerGeneratedThreadListItemSchema,
-  OpenCodeThreadListItemSchema
+  OpenCodeThreadListItemSchema,
+  ClaudeThreadListItemSchema,
+  QwenThreadListItemSchema
 ]);
 
 export const AppServerListThreadsResponseSchema = z
